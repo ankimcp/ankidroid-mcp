@@ -39,15 +39,22 @@ class AndroidWakeLocks(context: Context) : WakeLocks {
  * system limits these to about once a minute normally and about every 15 minutes in deep
  * Doze. Deliberately not an exact alarm: `SCHEDULE_EXACT_ALARM` is denied by default on
  * Android 14+ and `USE_EXACT_ALARM` is restricted on Google Play to alarm/calendar apps.
+ *
+ * Each [action] (with its own [requestCode]) is a separate alarm slot: the reconnect/liveness
+ * alarm and the idle-deadline alarm do not replace each other.
  */
-class AlarmWakeupScheduler(context: Context) : WakeupScheduler {
+class AlarmWakeupScheduler(
+    context: Context,
+    requestCode: Int = 0,
+    action: String = TunnelAlarmReceiver.ACTION_WAKEUP,
+) : WakeupScheduler {
     private val appContext = context.applicationContext
     private val alarms = appContext.getSystemService(AlarmManager::class.java)
 
     private val operation: PendingIntent = PendingIntent.getBroadcast(
         appContext,
-        0,
-        Intent(appContext, TunnelAlarmReceiver::class.java).setAction(TunnelAlarmReceiver.ACTION_WAKEUP),
+        requestCode,
+        Intent(appContext, TunnelAlarmReceiver::class.java).setAction(action),
         PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
     )
 
@@ -67,12 +74,16 @@ class AlarmWakeupScheduler(context: Context) : WakeupScheduler {
 /** Delivers [AlarmWakeupScheduler] alarms to the tunnel. */
 class TunnelAlarmReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action != ACTION_WAKEUP) return
         // Runs under the alarm's own wake lock; onWakeup takes a short one of its own before returning.
-        context.appGraph.tunnel.onWakeup()
+        when (intent.action) {
+            ACTION_WAKEUP -> context.appGraph.tunnel.onWakeup()
+            ACTION_IDLE_DEADLINE -> context.appGraph.tunnel.onIdleAlarm()
+        }
     }
 
     companion object {
         const val ACTION_WAKEUP = "ai.ankimcp.ankidroid.action.TUNNEL_WAKEUP"
+        const val ACTION_IDLE_DEADLINE = "ai.ankimcp.ankidroid.action.TUNNEL_IDLE_DEADLINE"
+        const val IDLE_REQUEST_CODE = 1
     }
 }

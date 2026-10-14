@@ -4,9 +4,12 @@ This is the protocol between the app and the AnkiMCP tunnel relay
 (`anki-mcp-saas/apps/tunnel`). It is meant to be byte-compatible with the desktop
 add-on (`anki-mcp-server-addon/anki_mcp_server/tunnel/`). Everything below matches the
 add-on unless it is listed under [Deviations from the add-on](#deviations-from-the-add-on).
+The push wake-up and device registration (an app-only addition, no tunnel frames involved) are
+described in [Push wake-up and device registration](#push-wake-up-and-device-registration).
 
 Code: `app/src/main/java/ai/ankimcp/ankidroid/tunnel/Protocol.kt`, `TunnelClient.kt`,
-`TunnelConnection.kt`, `ReconnectPolicy.kt`, `auth/DeviceFlowClient.kt`, `mcp/McpServer.kt`.
+`TunnelConnection.kt`, `ReconnectPolicy.kt`, `auth/DeviceFlowClient.kt`, `mcp/McpServer.kt`,
+`push/PushTokenRegistrar.kt`, `push/WakeHandler.kt`.
 
 ## Endpoints
 
@@ -15,6 +18,7 @@ Code: `app/src/main/java/ai/ankimcp/ankidroid/tunnel/Protocol.kt`, `TunnelClient
 | WebSocket | `wss://tunnel.ankimcp.ai` (root path) |
 | Device code | `POST https://tunnel.ankimcp.ai/auth/device` |
 | Token / refresh | `POST https://tunnel.ankimcp.ai/auth/token` |
+| Push token | `PUT` / `DELETE https://tunnel.ankimcp.ai/devices/push` |
 | MCP URL for Claude | `https://tunnel.ankimcp.ai/mcp` (sent by the relay in `tunnel_established`) |
 
 The HTTPS base is derived from the WebSocket URL by swapping the scheme only
@@ -147,13 +151,75 @@ Socket failures without a close frame are treated as 1001.
 - `attempt` counts consecutive failures; it is incremented *before* the delay is computed
   (so the first retry waits about 2 s, as in the add-on) and reset to 0 on every
   `tunnel_established`.
-- Give up after 10 consecutive failures, unless "Keep connected" is on: then keep retrying
-  every 30 s (see Deviations).
+- Give up after 10 consecutive failures, unless the connection mode is "Always connected":
+  then keep retrying every 30 s (see Deviations).
 - Before each attempt, refresh the access token if it expires within 60 s. A refresh that
   fails with `invalid_grant` stops the tunnel and requires sign-in; any other refresh failure
   is logged and the connection is attempted with the old token.
 - Backoffs up to 5 s keep the CPU awake with a wake lock; longer ones are woken by an alarm,
   so in Doze they can take longer than computed (docs/DECISIONS.md D27/D29).
+
+## Push wake-up and device registration
+
+Not part of the tunnel protocol: the WebSocket frames above are unchanged. In on-demand mode
+the phone does not hold the socket; when Claude sends a request for an account whose device is
+not connected, the server sends an FCM wake-up and the app connects. Design choices around it
+are in docs/DECISIONS.md D31-D39.
+
+### Device registration
+
+Base URL: the HTTPS base derived from the tunnel WebSocket URL (same derivation as
+`/auth/device`). Every call carries `Authorization: Bearer <access token>`; an expired access
+token is refreshed first (shared `TokenRefresher`). JSON bodies, `Content-Type:
+application/json`.
+
+Register (or update) this device's FCM token:
+
+```
+PUT /devices/push
+{"clientType":"ankidroid","fcmToken":"<FCM registration token>","platform":"android","appVersion":"<versionName>"}
+-> 204
+```
+
+Remove it:
+
+```
+DELETE /devices/push
+{"fcmToken":"<FCM registration token>"}
+-> 204
+```
+
+| Response | Client action |
+|---|---|
+| 2xx (204 expected) | done |
+| 401 | refresh the access token once and retry once; a second 401 gives up until the next trigger |
+| 400, other 4xx | log (with the body's `message` or `error` text if JSON), no retry until the next trigger |
+| 429, 5xx, network error | retry later with WorkManager (exponential backoff from 1 min, network required) |
+| refresh fails with `invalid_grant` | nothing more; the user has to sign in |
+
+When: after sign-in; in `FirebaseMessagingService.onNewToken`; on app start and in a daily
+background check, if the last attempt failed, the token or app version changed since the last
+successful registration, or that registration is 7 days old or more. The app has no FCM token
+before the first sign-in (auto-init is off until then). Unregister: on logout, before the
+credentials are cleared (they authenticate the DELETE). Switching to "Always connected" does
+not unregister.
+
+### Wake message
+
+High-priority FCM **data** message (no `notification` payload):
+
+```json
+{"type":"wake","reason":"mcp_request"}
+```
+
+- Tunnel connected: ignored. Tunnel running but between reconnect attempts: retry now.
+- Otherwise: start the foreground service (its notification is shown if the user allowed
+  notifications) and connect, in either connection mode. In on-demand mode the session then
+  ends after the idle window (15 / 30 / 60 min) without a `request` frame.
+- Signed out, or signing out: no connection, only a log line.
+- The refresh token is dead (`invalid_grant` when refreshing before the connection) or access
+  was revoked: no connection; a local notification "Sign in again to AnkiMCP" is posted.
+- Other `type` values are ignored; `reason` is only logged.
 
 ## MCP over the tunnel
 
@@ -233,9 +299,13 @@ collection adds `"message": "No decks found in AnkiDroid"`.
    docs/DECISIONS.md.
 10. **AnkiDroid provider timeout** is 20 s, inside the 25 s request budget, so a hung
     AnkiDroid produces a readable tool error instead of a 504.
-11. **Keep connected**: with the user's "Keep connected" setting on, the app does not give up
-    after 10 failures but keeps retrying every 30 s (shown as "Retrying every 30s"). With it
-    off, it stops after 10 like the add-on.
+11. **Always connected**: in the user's "Always connected" mode the app does not give up
+    after 10 failures but keeps retrying every 30 s (shown as "Retrying every 30s"). In
+    on-demand mode it stops after 10 like the add-on.
 12. **MCP protocol versions**: `2025-11-25` is not offered (the add-on's SDK lists it); a client
     asking for it gets `2025-06-18`. `structuredContent`/`outputSchema` follow the request's
     `mcp-protocol-version`.
+13. **Client-side idle timeout**: in on-demand mode (with push wake-ups available) the app
+    closes the socket with 1000 after 15 / 30 / 60 minutes without a `request` frame and does
+    not reconnect until the next wake-up or Connect. The add-on has no such timer. The relay's
+    own 4010 IDLE_TIMEOUT is unrelated and handled as in the table above.

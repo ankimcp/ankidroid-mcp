@@ -37,4 +37,15 @@ class ForegroundServiceStarterTest {
         assertTrue(blocked.isEmpty())
         assertTrue(log.entries.value.isEmpty())
     }
+
+    @Test
+    fun `the service starts the tunnel only when the caller does not`() {
+        var starts = 0
+
+        startTunnelUnlessCallerDid(callerStartsTunnel = true) { starts++ }
+        assertEquals("a wake-up starts the tunnel itself", 0, starts)
+
+        startTunnelUnlessCallerDid(callerStartsTunnel = false) { starts++ }
+        assertEquals("Connect, boot and auto-connect rely on the service", 1, starts)
+    }
 }

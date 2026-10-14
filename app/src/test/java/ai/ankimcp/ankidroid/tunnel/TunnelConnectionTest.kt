@@ -14,6 +14,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.currentTime
 import kotlinx.coroutines.test.runCurrent
@@ -66,6 +67,7 @@ class TunnelConnectionTest {
     private class FakeSession(
         private val step: Step,
         private val onEstablished: (String) -> Unit,
+        private val onRequest: () -> Unit,
         private val health: (FakeSession) -> Boolean,
     ) : TunnelSession {
         private val hang = CompletableDeferred<CloseResult>()
@@ -73,6 +75,9 @@ class TunnelConnectionTest {
         var disconnected = false
         var abortedWith: String? = null
         var healthChecks = 0
+
+        /** Simulates a `request` frame arriving from the relay. */
+        fun request() = onRequest()
 
         override suspend fun run(): CloseResult = when (step) {
             is Step.Fail -> throw TunnelConnectionException("scripted failure", step.closeCode)
@@ -119,9 +124,10 @@ class TunnelConnectionTest {
         val usedTokens = CopyOnWriteArrayList<String>()
         val sessions = CopyOnWriteArrayList<FakeSession>()
 
-        override fun create(credentials: Credentials, onEstablished: (String) -> Unit): TunnelSession {
+        override fun create(credentials: Credentials, onEstablished: (String) -> Unit, onRequest: () -> Unit): TunnelSession {
             usedTokens += credentials.accessToken
-            return FakeSession(remaining.removeFirstOrNull() ?: Step.Fail(), onEstablished, health).also { sessions += it }
+            val step = remaining.removeFirstOrNull() ?: Step.Fail()
+            return FakeSession(step, onEstablished, onRequest, health).also { sessions += it }
         }
     }
 
@@ -184,6 +190,10 @@ class TunnelConnectionTest {
         policy: ReconnectPolicy = ReconnectPolicy(random = Random(0)),
         wakeLocks: WakeLocks = WakeLocks.None,
         wakeups: WakeupScheduler = WakeupScheduler.None,
+        idleTimeoutMs: () -> Long? = { null },
+        idleWakeups: WakeupScheduler = WakeupScheduler.None,
+        elapsedClock: ElapsedClock = ElapsedClock { testScheduler.currentTime },
+        log: TunnelLog = TunnelLog(mirrorToLogcat = false),
     ): TunnelConnection {
         val authClient = DeviceFlowClient(
             server.url("/").toString().replaceFirst("http://", "ws://").trimEnd('/'),
@@ -196,10 +206,13 @@ class TunnelConnectionTest {
             sessionFactory = factory,
             policy = policy,
             networkAvailable = network,
-            log = TunnelLog(mirrorToLogcat = false),
+            log = log,
             keepRetrying = { keepRetrying },
             wakeLocks = wakeLocks,
             wakeups = wakeups,
+            idleTimeoutMs = idleTimeoutMs,
+            idleWakeups = idleWakeups,
+            elapsedClock = elapsedClock,
         )
     }
 
@@ -666,5 +679,204 @@ class TunnelConnectionTest {
         assertEquals(listOf(TunnelConnection.LIVENESS_CHECK_MS, 20_000L), wakeups.scheduled.toList())
         assertEquals(20_000L, wakeups.pending)
         tunnel.stop()
+    }
+
+    @Test
+    fun `idle timer stops the tunnel at the deadline`() = runTest {
+        val idleWakeups = RecordingWakeups()
+        val log = TunnelLog(mirrorToLogcat = false)
+        val factory = ScriptedFactory(listOf(Step.EstablishThenHang))
+        val tunnel = connection(
+            InMemoryStore(credentials),
+            factory,
+            idleTimeoutMs = { IDLE_MS },
+            idleWakeups = idleWakeups,
+            log = log,
+        )
+
+        tunnel.start()
+        runCurrent()
+        assertEquals(IDLE_MS, tunnel.idleDeadlineMs.value)
+        assertEquals("the Doze-proof alarm is armed for the deadline", IDLE_MS, idleWakeups.pending)
+
+        advanceTimeBy(IDLE_MS - 1)
+        runCurrent()
+        assertTrue(tunnel.state.value is TunnelState.Connected)
+
+        advanceTimeBy(1)
+        runCurrent()
+
+        val stopped = tunnel.state.value as TunnelState.Stopped
+        assertTrue(stopped.idleTimeout)
+        assertEquals(CloseCodes.NORMAL, stopped.code)
+        assertEquals("No requests for 30 min", stopped.reason)
+        assertFalse(stopped.reloginRequired)
+        assertFalse(tunnel.isRunning)
+        assertTrue(factory.sessions.single().disconnected)
+        assertNull(tunnel.idleDeadlineMs.value)
+        assertNull(idleWakeups.pending)
+        val messages = log.entries.value.map { it.message }
+        assertTrue(messages.toString(), messages.contains("Idle timeout: no requests for 30 min, disconnecting"))
+        assertTrue(messages.toString(), messages.contains("Tunnel stopped: No requests for 30 min"))
+    }
+
+    @Test
+    fun `a request frame resets the idle timer`() = runTest {
+        val idleWakeups = RecordingWakeups()
+        val factory = ScriptedFactory(listOf(Step.EstablishThenHang))
+        val tunnel = connection(
+            InMemoryStore(credentials),
+            factory,
+            idleTimeoutMs = { IDLE_MS },
+            idleWakeups = idleWakeups,
+        )
+
+        tunnel.start()
+        runCurrent()
+        advanceTimeBy(20 * MINUTE)
+        factory.sessions.single().request()
+        assertEquals(20 * MINUTE + IDLE_MS, tunnel.idleDeadlineMs.value)
+
+        // The original deadline passes: the timer re-arms for the remaining 20 minutes instead of stopping.
+        advanceTimeBy(IDLE_MS - 20 * MINUTE + MINUTE)
+        runCurrent()
+        assertTrue(tunnel.state.value is TunnelState.Connected)
+        assertEquals(20 * MINUTE, idleWakeups.pending)
+
+        advanceTimeBy(20 * MINUTE)
+        runCurrent()
+        assertTrue((tunnel.state.value as TunnelState.Stopped).idleTimeout)
+        assertEquals(51 * MINUTE, currentTime)
+    }
+
+    @Test
+    fun `idle timer is disabled in always connected mode`() = runTest {
+        val idleWakeups = RecordingWakeups()
+        val tunnel = connection(
+            InMemoryStore(credentials),
+            ScriptedFactory(listOf(Step.EstablishThenHang)),
+            idleTimeoutMs = { null },
+            idleWakeups = idleWakeups,
+        )
+
+        tunnel.start()
+        advanceTimeBy(3 * 60 * MINUTE)
+        runCurrent()
+
+        assertTrue(tunnel.state.value is TunnelState.Connected)
+        assertNull(tunnel.idleDeadlineMs.value)
+        assertTrue(idleWakeups.scheduled.isEmpty())
+        tunnel.stop()
+    }
+
+    @Test
+    fun `idle alarm stops the tunnel when Doze kept the coroutine timer from firing`() = runTest {
+        var elapsed = 0L
+        val tunnel = connection(
+            InMemoryStore(credentials),
+            ScriptedFactory(listOf(Step.EstablishThenHang)),
+            idleTimeoutMs = { IDLE_MS },
+            elapsedClock = ElapsedClock { elapsed },
+        )
+        tunnel.start()
+        runCurrent()
+
+        // The CPU slept: elapsedRealtime moved on, coroutine time did not.
+        elapsed = IDLE_MS + 5 * MINUTE
+        tunnel.onIdleAlarm()
+
+        assertTrue((tunnel.state.value as TunnelState.Stopped).idleTimeout)
+        assertFalse(tunnel.isRunning)
+    }
+
+    @Test
+    fun `idle alarm before the deadline re-arms for the remaining time`() = runTest {
+        var elapsed = 0L
+        val idleWakeups = RecordingWakeups()
+        val tunnel = connection(
+            InMemoryStore(credentials),
+            ScriptedFactory(listOf(Step.EstablishThenHang)),
+            idleTimeoutMs = { IDLE_MS },
+            idleWakeups = idleWakeups,
+            elapsedClock = ElapsedClock { elapsed },
+        )
+        tunnel.start()
+        runCurrent()
+
+        elapsed = IDLE_MS - 10 * MINUTE
+        tunnel.onIdleAlarm()
+
+        assertTrue(tunnel.state.value is TunnelState.Connected)
+        assertEquals(10 * MINUTE, idleWakeups.pending)
+        tunnel.stop()
+    }
+
+    @Test
+    fun `switching to always connected mid-session cancels the idle timer`() = runTest {
+        var window: Long? = IDLE_MS
+        val idleWakeups = RecordingWakeups()
+        val tunnel = connection(
+            InMemoryStore(credentials),
+            ScriptedFactory(listOf(Step.EstablishThenHang)),
+            idleTimeoutMs = { window },
+            idleWakeups = idleWakeups,
+        )
+        tunnel.start()
+        runCurrent()
+        assertEquals(IDLE_MS, idleWakeups.pending)
+
+        window = null
+        tunnel.onIdleSettingsChanged()
+
+        assertNull(tunnel.idleDeadlineMs.value)
+        assertNull(idleWakeups.pending)
+        advanceTimeBy(2 * IDLE_MS)
+        runCurrent()
+        assertTrue(tunnel.state.value is TunnelState.Connected)
+        tunnel.stop()
+    }
+
+    @Test
+    fun `the idle timer of a stopped run cannot stop the next run early`() = runTest {
+        val factory = ScriptedFactory(listOf(Step.EstablishThenHang, Step.EstablishThenHang))
+        val tunnel = connection(InMemoryStore(credentials), factory, idleTimeoutMs = { IDLE_MS })
+
+        tunnel.start()
+        runCurrent()
+        advanceTimeBy(10 * MINUTE)
+        tunnel.stop()
+        tunnel.start()
+        runCurrent()
+
+        advanceTimeBy(IDLE_MS - 1)
+        runCurrent()
+        assertTrue("first run's deadline must not stop the second run", tunnel.state.value is TunnelState.Connected)
+
+        advanceTimeBy(1)
+        runCurrent()
+        assertTrue((tunnel.state.value as TunnelState.Stopped).idleTimeout)
+        assertEquals(40 * MINUTE, currentTime)
+    }
+
+    @Test
+    fun `the idle timer keeps counting while the tunnel reconnects`() = runTest {
+        val factory = ScriptedFactory(List(20) { Step.Fail() })
+        val tunnel = connection(
+            InMemoryStore(credentials),
+            factory,
+            keepRetrying = true,
+            idleTimeoutMs = { IDLE_MS },
+        )
+
+        tunnel.start()
+        advanceTimeBy(IDLE_MS)
+        runCurrent()
+
+        assertTrue((tunnel.state.value as TunnelState.Stopped).idleTimeout)
+    }
+
+    private companion object {
+        const val MINUTE = 60_000L
+        const val IDLE_MS = 30 * MINUTE
     }
 }

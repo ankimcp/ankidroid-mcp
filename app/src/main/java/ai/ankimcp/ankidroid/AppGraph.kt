@@ -9,14 +9,30 @@ import ai.ankimcp.ankidroid.auth.DeviceFlowClient
 import ai.ankimcp.ankidroid.auth.KeystoreCredentialStore
 import ai.ankimcp.ankidroid.auth.TokenRefresher
 import ai.ankimcp.ankidroid.config.AppConfig
-import ai.ankimcp.ankidroid.config.AppSettings
 import ai.ankimcp.ankidroid.log.TunnelLog
 import ai.ankimcp.ankidroid.mcp.McpServer
 import ai.ankimcp.ankidroid.mcp.ToolRegistry
+import ai.ankimcp.ankidroid.push.FirebasePushMessaging
+import ai.ankimcp.ankidroid.push.PushCoordinator
+import ai.ankimcp.ankidroid.push.PushRegistrationStore
+import ai.ankimcp.ankidroid.push.PushTokenRegistrar
+import ai.ankimcp.ankidroid.push.SignInNotifier
+import ai.ankimcp.ankidroid.push.WakeHandler
+import ai.ankimcp.ankidroid.push.WorkManagerPushWorkScheduler
+import ai.ankimcp.ankidroid.push.WorkManagerQueue
 import ai.ankimcp.ankidroid.service.AlarmWakeupScheduler
 import ai.ankimcp.ankidroid.service.AndroidElapsedClock
+import ai.ankimcp.ankidroid.service.AndroidSignInNotifier
 import ai.ankimcp.ankidroid.service.AndroidWakeLocks
 import ai.ankimcp.ankidroid.service.NetworkMonitor
+import ai.ankimcp.ankidroid.service.NotificationPermissionGate
+import ai.ankimcp.ankidroid.service.TunnelAlarmReceiver
+import ai.ankimcp.ankidroid.service.TunnelForegroundService
+import ai.ankimcp.ankidroid.service.notificationBlockReason
+import ai.ankimcp.ankidroid.settings.ConnectionMode
+import ai.ankimcp.ankidroid.settings.ConnectionSettings
+import ai.ankimcp.ankidroid.settings.IdleWindow
+import ai.ankimcp.ankidroid.settings.SharedPreferencesKeyValueStore
 import ai.ankimcp.ankidroid.tools.ListDecksTool
 import ai.ankimcp.ankidroid.tunnel.ProtocolConstants
 import ai.ankimcp.ankidroid.tunnel.ReconnectPolicy
@@ -25,8 +41,12 @@ import ai.ankimcp.ankidroid.tunnel.TunnelConnection
 import ai.ankimcp.ankidroid.tunnel.TunnelSessionFactory
 import android.content.Context
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import java.util.concurrent.TimeUnit
 
@@ -35,7 +55,9 @@ class AppGraph(context: Context) {
     private val appContext = context.applicationContext
 
     val config: AppConfig = AppConfig.fromBuildConfig()
-    val settings = AppSettings(appContext)
+    val settings = ConnectionSettings(
+        SharedPreferencesKeyValueStore(appContext.getSharedPreferences(ConnectionSettings.PREFS_NAME, Context.MODE_PRIVATE)),
+    )
     val log = TunnelLog()
     val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
@@ -79,11 +101,34 @@ class AppGraph(context: Context) {
 
     private val wakeLocks = AndroidWakeLocks(appContext)
 
+    val notificationPermission = NotificationPermissionGate(log) { channelId -> notificationBlockReason(appContext, channelId) }
+
+    val push = PushCoordinator(
+        messaging = FirebasePushMessaging(appContext),
+        registrar = PushTokenRegistrar(
+            tunnelWsUrl = config.tunnelUrl,
+            http = authHttp,
+            credentialStore = credentialStore,
+            refresher = tokenRefresher,
+            appVersion = config.appVersion,
+            log = log,
+        ),
+        store = PushRegistrationStore(
+            SharedPreferencesKeyValueStore(
+                appContext.getSharedPreferences(PushRegistrationStore.PREFS_NAME, Context.MODE_PRIVATE),
+            ),
+        ),
+        isSignedIn = { credentialStore.load() != null },
+        appVersion = config.appVersion,
+        work = WorkManagerPushWorkScheduler(WorkManagerQueue(appContext)),
+        log = log,
+    )
+
     val tunnel = TunnelConnection(
         scope = appScope,
         credentialStore = credentialStore,
         refresher = tokenRefresher,
-        sessionFactory = TunnelSessionFactory { credentials, onEstablished ->
+        sessionFactory = TunnelSessionFactory { credentials, onEstablished, onRequest ->
             TunnelClient(
                 http = tunnelHttp,
                 url = config.tunnelUrl,
@@ -94,13 +139,81 @@ class AppGraph(context: Context) {
                 clock = AndroidElapsedClock,
                 wakeLocks = wakeLocks,
                 onEstablished = onEstablished,
+                onRequest = onRequest,
             )
         },
         policy = ReconnectPolicy(),
         networkAvailable = networkMonitor.available,
         log = log,
-        keepRetrying = { settings.keepConnected.value },
+        keepRetrying = { settings.alwaysConnected },
         wakeLocks = wakeLocks,
         wakeups = AlarmWakeupScheduler(appContext),
+        idleTimeoutMs = { idleTimeoutMs(settings.mode.value, settings.idleWindow.value, push.wakeUpsReady) },
+        idleWakeups = AlarmWakeupScheduler(
+            appContext,
+            requestCode = TunnelAlarmReceiver.IDLE_REQUEST_CODE,
+            action = TunnelAlarmReceiver.ACTION_IDLE_DEADLINE,
+        ),
+        elapsedClock = AndroidElapsedClock,
+    )
+
+    init {
+        appScope.reevaluateIdleTimerOnReadiness(push.wakeUpsReadyState, tunnel)
+    }
+
+    val signInNotifier: SignInNotifier = AndroidSignInNotifier(appContext, notificationPermission)
+
+    val wakeHandler: WakeHandler = buildWakeHandler(
+        scope = appScope,
+        tunnel = tunnel,
+        push = push,
+        isSignedIn = { credentialStore.load() != null },
+        startService = { callerStartsTunnel -> TunnelForegroundService.start(appContext, callerStartsTunnel) },
+        notifier = signInNotifier,
+        log = log,
     )
 }
+
+/**
+ * On-demand sessions end after the idle window, but only when a push wake-up can bring the
+ * tunnel back; without push, on-demand falls back to a manual session that stays up.
+ */
+internal fun idleTimeoutMs(mode: ConnectionMode, window: IdleWindow, wakeUpsReady: Boolean): Long? =
+    if (mode == ConnectionMode.OnDemand && wakeUpsReady) window.millis else null
+
+/**
+ * The idle timer reads [wakeUpsReady] only when it is (re)armed, so a registration that succeeds
+ * or breaks mid-session must re-arm it: otherwise a session could stay up forever, or keep
+ * disconnecting while the server can no longer wake the phone.
+ */
+internal fun CoroutineScope.reevaluateIdleTimerOnReadiness(wakeUpsReady: StateFlow<Boolean>, tunnel: TunnelConnection): Job =
+    launch(start = CoroutineStart.UNDISPATCHED) {
+        wakeUpsReady.collect { tunnel.onIdleSettingsChanged() }
+    }
+
+/**
+ * Wake-ups start the service with `callerStartsTunnel = true` (see
+ * [ai.ankimcp.ankidroid.service.startTunnelUnlessCallerDid]) and own the tunnel run themselves;
+ * [startService] is `TunnelForegroundService.start` in the app.
+ */
+internal fun buildWakeHandler(
+    scope: CoroutineScope,
+    tunnel: TunnelConnection,
+    push: PushCoordinator,
+    isSignedIn: () -> Boolean,
+    startService: (callerStartsTunnel: Boolean) -> Boolean,
+    notifier: SignInNotifier,
+    log: TunnelLog,
+): WakeHandler = WakeHandler(
+    scope = scope,
+    tunnelState = tunnel.state,
+    isTunnelRunning = { tunnel.isRunning },
+    isSignedIn = isSignedIn,
+    isSigningOut = { push.isSigningOut },
+    startService = { startService(true) },
+    startTunnel = tunnel::start,
+    stopTunnel = { tunnel.stop("Signing out") },
+    nudgeTunnel = tunnel::onWakeup,
+    notifier = notifier,
+    log = log,
+)

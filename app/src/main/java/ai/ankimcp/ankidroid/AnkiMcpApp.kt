@@ -13,7 +13,12 @@ class AnkiMcpApp : Application() {
         super.onCreate()
         graph = AppGraph(this)
         // Keystore decrypt + prefs read stay off the main thread; the UI waits on `loaded`.
-        graph.appScope.launch(Dispatchers.IO) { graph.credentialStore.load() }
+        graph.appScope.launch(Dispatchers.IO) {
+            graph.credentialStore.load()
+            // Re-registers the push token if it changed, the app version changed, or it is 7 days
+            // old, and makes sure the daily check is enqueued.
+            graph.push.onAppStart()
+        }
     }
 }
 

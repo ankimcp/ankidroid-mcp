@@ -11,7 +11,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
-/** Reconnects after boot or an app update, but only if the user turned on "keep connected". */
+/** Reconnects after boot or an app update, but only in "Always connected" mode. */
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != Intent.ACTION_BOOT_COMPLETED && intent.action != Intent.ACTION_MY_PACKAGE_REPLACED) return
@@ -22,7 +22,7 @@ class BootReceiver : BroadcastReceiver() {
             scope = graph.appScope,
             io = Dispatchers.IO,
             // Reading credentials may decrypt with the Keystore: not on the main thread.
-            shouldStart = { graph.settings.keepConnected.value && graph.credentialStore.load() != null },
+            shouldStart = { graph.settings.alwaysConnected && graph.credentialStore.load() != null },
             start = { TunnelForegroundService.start(appContext) },
             finish = pending::finish,
         )

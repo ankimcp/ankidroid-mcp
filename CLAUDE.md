@@ -16,24 +16,33 @@ through its ContentProvider. Single `app` module, package `ai.ankimcp.ankidroid`
 
 Needs JDK 17+ and Android SDK platform 36. Versions live in `gradle/libs.versions.toml`;
 androidx pins are capped at releases that compile against SDK 36 with AGP 8.13
-(docs/DECISIONS.md D1-D3).
+(docs/DECISIONS.md D1-D3). `app/google-services.json` is optional and gitignored (Bitwarden,
+see README); without it the google-services plugin is skipped and push is unavailable (D33).
 
 ## Layout
 
 ```
 app/src/main/java/ai/ankimcp/ankidroid/
   AnkiMcpApp.kt, AppGraph.kt   manual DI; AppGraph owns the long-lived objects
-  config/      AppConfig (BuildConfig.TUNNEL_URL, version), AppSettings ("keep connected")
+  config/      AppConfig (BuildConfig.TUNNEL_URL, version)
+  settings/    ConnectionSettings (ConnectionMode OnDemand/Always, IdleWindow 15/30/60,
+               migrates the old keep_connected flag), KeyValueStore (SharedPreferences seam)
   auth/        DeviceFlowClient, Credentials, CredentialStore (Keystore AES-GCM), TokenRefresher
   tunnel/      Protocol (messages, close codes), TunnelClient (OkHttp WS, one connection),
-               ReconnectPolicy, TunnelConnection (reconnect state machine),
+               ReconnectPolicy, TunnelConnection (reconnect state machine + idle timer),
                WakeSupport (ElapsedClock, WakeLocks, WakeupScheduler interfaces)
+  push/        PushMessaging (Firebase seam) + FirebasePushMessaging, PushTokenRegistrar
+               (/devices/push), PushRegistrationState(+Store), PushCoordinator (when to
+               register, logout order), PushRegistrationWorker (WorkManager retry + daily
+               check), WakeHandler (wake message -> FGS + tunnel), AnkiMcpMessagingService (FCM)
   mcp/         JsonRpc, McpServer (stateless), Tool + ToolRegistry
   anki/        FlashCardsContract (vendored, keep header), AnkiProvider (ContentResolver seam),
                AnkiDroidRepository, AnkiDroidAvailability
   tools/       ListDecksTool
   service/     TunnelForegroundService (specialUse FGS), BootReceiver, NetworkMonitor,
-               AndroidWakeSupport (elapsedRealtime, wake locks, while-idle alarm + receiver)
+               AndroidWakeSupport (elapsedRealtime, wake locks, while-idle alarms + receiver),
+               SignInNotifications ("Sign in again" notification), NotificationPermission
+               (permission, app switch and channel check per notification, logs dropped ones)
   ui/          MainActivity, MainViewModel, Onboarding/SignIn/Status screens, Theme
   log/         TunnelLog (100-entry ring buffer shown in the UI)
 app/src/test/java/...          JVM unit tests (JUnit 4, coroutines-test, MockWebServer)
@@ -44,8 +53,12 @@ app/src/test/java/...          JVM unit tests (JUnit 4, coroutines-test, MockWeb
 - The tunnel protocol must stay byte-compatible with the desktop add-on
   (`../anki-mcp-server-addon/anki_mcp_server/tunnel/`) and the relay
   (`../anki-mcp-saas/apps/tunnel/`). Any intentional difference goes into the "Deviations"
-  section of docs/PROTOCOL.md.
-- Never log tokens. `TunnelLog` is rendered in the UI and mirrored to logcat.
+  section of docs/PROTOCOL.md. The push registration contract is in the same file.
+- Never log tokens (access, refresh or FCM). `TunnelLog` is rendered in the UI and mirrored to
+  logcat.
+- Only `push/FirebasePushMessaging.kt` and `push/AnkiMcpMessagingService.kt` may import
+  Firebase; everything else goes through `PushMessaging` so tests never touch Firebase and the
+  app runs without `google-services.json`.
 - Tool failures are `ToolResult.error(...)` (`isError: true`) with a human-readable message, not
   exceptions or JSON-RPC errors.
 - All ContentProvider access goes through `AnkiProvider` + `AnkiDroidRepository` (bounded

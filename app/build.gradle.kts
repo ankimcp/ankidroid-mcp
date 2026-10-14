@@ -7,6 +7,14 @@ plugins {
     alias(libs.plugins.kotlin.serialization)
 }
 
+// google-services.json is not in the repo (it lives in Bitwarden, see README). Without it the
+// plugin is skipped, Firebase never initialises, and the app runs with push wake-ups disabled.
+if (file("google-services.json").exists()) {
+    apply(plugin = libs.plugins.google.services.get().pluginId)
+} else {
+    logger.lifecycle("app/google-services.json not found: building without Firebase push")
+}
+
 val defaultTunnelUrl = "wss://tunnel.ankimcp.ai"
 val devTunnelUrl: String =
     providers.gradleProperty("ankimcp.tunnelUrl").orElse(defaultTunnelUrl).get()
@@ -70,11 +78,15 @@ dependencies {
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.lifecycle.process)
     implementation(libs.androidx.browser)
+    implementation(libs.androidx.work.runtime.ktx)
     implementation(platform(libs.compose.bom))
     implementation(libs.compose.ui)
     implementation(libs.compose.ui.tooling.preview)
     implementation(libs.compose.material3)
     debugImplementation(libs.compose.ui.tooling)
+
+    implementation(platform(libs.firebase.bom))
+    implementation(libs.firebase.messaging)
 
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.kotlinx.serialization.json)
