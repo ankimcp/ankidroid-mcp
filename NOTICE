@@ -1,0 +1,19 @@
+AnkiDroid MCP
+Copyright (c) AnkiMCP
+
+This product includes third-party material:
+
+1. FlashCardsContract.kt
+   Source: https://github.com/ankidroid/Anki-Android/blob/main/api/src/main/java/com/ichi2/anki/FlashCardsContract.kt
+   Upstream commit: 9b4bd9525c3e7b1721493d9fdef8ca30c4e12957 (2026-10-03)
+   Location in this project: app/src/main/java/ai/ankimcp/ankidroid/anki/FlashCardsContract.kt
+   License (from the file header, preserved verbatim):
+     "Copying and distribution of this file, with or without modification, are
+      permitted in any medium without royalty. This file is offered as-is,
+      without any warranty."
+   Note: the rest of the AnkiDroid `api` module is LGPL-3.0; this particular file
+   carries the all-permissive notice above. Modifications: package renamed,
+   BuildConfig constants inlined, unused import removed.
+
+2. Runtime dependencies (OkHttp, kotlinx.coroutines, kotlinx.serialization,
+   AndroidX, Jetpack Compose) are used under the Apache License 2.0.
