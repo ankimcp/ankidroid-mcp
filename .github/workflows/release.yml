@@ -1,0 +1,204 @@
+name: Release
+
+# Cut a release by bumping versionName in version.properties, merging, then pushing tag
+# v<versionName> (docs/RELEASING.md). Any other tag fails the version gate.
+on:
+  push:
+    tags:
+      - 'v*'
+
+# One run per tag. A second run for the same tag queues behind the first rather than
+# cancelling it halfway through publishing the Release or a Play edit.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # Seconds-long check ahead of the build: a tag that does not name versionName cannot
+  # produce a release. The jobs below re-derive and re-check the version themselves, so
+  # re-running one of them alone still verifies the tag without trusting this job.
+  version-gate:
+    name: Verify tag matches versionName
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Resolve version and verify tag
+        run: python3 .github/scripts/resolve_version.py --expect-tag "$GITHUB_REF_NAME"
+
+  release:
+    name: Build, sign and publish GitHub Release
+    runs-on: ubuntu-latest
+    needs: version-gate
+    timeout-minutes: 30
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # Re-checked rather than assumed from version-gate, before anything is published.
+      - name: Resolve version and verify tag
+        id: version
+        run: python3 .github/scripts/resolve_version.py --expect-tag "$GITHUB_REF_NAME"
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-provider: basic
+
+      # A release must be signed: with any signing secret missing the job stops here instead
+      # of Gradle quietly building unsigned. The keystore is binary, so there is nothing
+      # printable to mask; the passwords are secrets and masked by the runner.
+      - name: Decode release keystore
+        env:
+          ANKIMCP_KEYSTORE_BASE64: ${{ secrets.ANKIMCP_KEYSTORE_BASE64 }}
+          ANKIMCP_KEYSTORE_PASSWORD: ${{ secrets.ANKIMCP_KEYSTORE_PASSWORD }}
+          ANKIMCP_KEY_ALIAS: ${{ secrets.ANKIMCP_KEY_ALIAS }}
+          ANKIMCP_KEY_PASSWORD: ${{ secrets.ANKIMCP_KEY_PASSWORD }}
+        run: |
+          missing=0
+          for name in ANKIMCP_KEYSTORE_BASE64 ANKIMCP_KEYSTORE_PASSWORD ANKIMCP_KEY_ALIAS ANKIMCP_KEY_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              echo "::error::secret $name is not set; see docs/RELEASING.md"
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ] || exit 1
+          keystore="$RUNNER_TEMP/ankimcp-release.jks"
+          printf '%s' "$ANKIMCP_KEYSTORE_BASE64" | base64 --decode > "$keystore"
+          echo "ANKIMCP_KEYSTORE_PATH=$keystore" >> "$GITHUB_ENV"
+
+      # Optional. With it the release includes Firebase push wake-ups; without it the
+      # google-services plugin is skipped and the app ships with push disabled.
+      - name: Decode google-services.json
+        env:
+          GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
+        run: |
+          if [ -z "$GOOGLE_SERVICES_JSON_BASE64" ]; then
+            echo "::warning::GOOGLE_SERVICES_JSON_BASE64 not set: building without Firebase push"
+            exit 0
+          fi
+          printf '%s' "$GOOGLE_SERVICES_JSON_BASE64" | base64 --decode > app/google-services.json
+          python3 - <<'PY'
+          import json
+          with open("app/google-services.json", encoding="utf-8") as f:
+              data = json.load(f)
+          for client in data.get("client", []):
+              for key in client.get("api_key", []):
+                  if key.get("current_key"):
+                      print(f"::add-mask::{key['current_key']}")
+          PY
+
+      - name: Test and build signed release
+        env:
+          ANKIMCP_KEYSTORE_PASSWORD: ${{ secrets.ANKIMCP_KEYSTORE_PASSWORD }}
+          ANKIMCP_KEY_ALIAS: ${{ secrets.ANKIMCP_KEY_ALIAS }}
+          ANKIMCP_KEY_PASSWORD: ${{ secrets.ANKIMCP_KEY_PASSWORD }}
+        run: ./gradlew :app:testDebugUnitTest :app:bundleRelease :app:assembleRelease --no-daemon
+
+      - name: Verify signatures
+        run: |
+          apksigner="$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -n1)apksigner"
+          "$apksigner" verify --verbose --print-certs app/build/outputs/apk/release/app-release.apk
+          # jarsigner -verify exits 0 on an unsigned jar too; only "jar verified." means signed.
+          jarsigner -verify app/build/outputs/bundle/release/app-release.aab | tee /dev/stderr | grep -q "jar verified."
+
+      - name: Collect release files
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          mkdir dist
+          cp app/build/outputs/apk/release/app-release.apk "dist/ankidroid-mcp-$TAG.apk"
+          cp app/build/outputs/bundle/release/app-release.aab "dist/ankidroid-mcp-$TAG.aab"
+          cd dist
+          sha256sum "ankidroid-mcp-$TAG.apk" "ankidroid-mcp-$TAG.aab" > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      # Handed to the play job so Play upload can be re-run on its own.
+      - name: Upload bundle for Play
+        uses: actions/upload-artifact@v7
+        with:
+          name: play-bundle
+          path: |
+            dist/ankidroid-mcp-${{ github.ref_name }}.aab
+            app/build/outputs/mapping/release/mapping.txt
+          if-no-files-found: error
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            dist/ankidroid-mcp-${{ github.ref_name }}.apk
+            dist/ankidroid-mcp-${{ github.ref_name }}.aab
+            dist/SHA256SUMS.txt
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          # A re-run rebuilds and re-signs; leave already published files alone instead of
+          # swapping them for a build whose checksum differs from the one users saw.
+          overwrite_files: false
+
+      - name: Remove keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/ankimcp-release.jks" app/google-services.json
+
+  # Optional: skipped unless PLAY_SERVICE_ACCOUNT_JSON is set. Separate job so a Play
+  # failure can be re-run alone, and it cannot touch the GitHub Release.
+  #
+  # FIRST UPLOAD IS MANUAL. The Play Developer API cannot create an app: upload the first
+  # AAB by hand in Play Console (Test and release > Internal testing > Create new release)
+  # before this job can work, otherwise it fails with "Package not found".
+  play:
+    name: Upload to Google Play (internal)
+    runs-on: ubuntu-latest
+    needs: release
+    timeout-minutes: 15
+    env:
+      HAS_PLAY_ACCOUNT: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON != '' }}
+
+    steps:
+      - name: Skip notice
+        if: env.HAS_PLAY_ACCOUNT != 'true'
+        run: echo "PLAY_SERVICE_ACCOUNT_JSON not set; skipping Play upload"
+
+      - uses: actions/checkout@v7
+        if: env.HAS_PLAY_ACCOUNT == 'true'
+
+      - name: Resolve version and verify tag
+        if: env.HAS_PLAY_ACCOUNT == 'true'
+        run: python3 .github/scripts/resolve_version.py --expect-tag "$GITHUB_REF_NAME"
+
+      - uses: actions/download-artifact@v8
+        if: env.HAS_PLAY_ACCOUNT == 'true'
+        with:
+          name: play-bundle
+          path: play-bundle
+
+      # status: completed. On the internal track that means testers get the build right
+      # away (internal releases are not reviewed), which is the point of automating it;
+      # draft would need a manual "Roll out" click per release. Exception: while the app is
+      # still a draft app in Play Console (nothing rolled out on any track yet) the API only
+      # accepts status draft; roll out the manual first release to avoid that.
+      #
+      # Release notes: add distribution/whatsnew/whatsnew-en-US (one file per locale) and
+      # they are uploaded; without the directory the action only warns and Play shows no notes.
+      - name: Upload AAB to internal track
+        if: env.HAS_PLAY_ACCOUNT == 'true'
+        uses: r0adkll/upload-google-play@v1
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+          packageName: ai.ankimcp.ankidroid
+          releaseFiles: play-bundle/dist/ankidroid-mcp-${{ github.ref_name }}.aab
+          mappingFile: play-bundle/app/build/outputs/mapping/release/mapping.txt
+          releaseName: ${{ github.ref_name }}
+          tracks: internal
+          status: completed
+          whatsNewDirectory: distribution/whatsnew
