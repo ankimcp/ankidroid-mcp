@@ -83,13 +83,15 @@ Needs JDK 17+ and an Android SDK with platform 36 (`sdk.dir` in `local.propertie
 prints `app/google-services.json not found: building without Firebase push`, the app shows
 "Push not configured in this build", and on demand works like a manual connection.
 
-Point a debug build at another relay, e.g. a local one from the emulator:
+Point a debug build at another relay, e.g. the development deployment, or a local one from the
+emulator:
 
 ```sh
+./gradlew :app:assembleDebug -Pankimcp.tunnelUrl=wss://ankidroid.ankimcp.uk
 ./gradlew :app:assembleDebug -Pankimcp.tunnelUrl=ws://10.0.2.2:3004
 ```
 
-Release builds always use `wss://tunnel.ankimcp.ai`. Cleartext `ws://` is only allowed to
+Release builds always use `wss://ankidroid.ankimcp.ai`. Cleartext `ws://` is only allowed to
 `10.0.2.2`, `localhost` and `127.0.0.1`.
 
 ## Contributing / development

@@ -53,7 +53,7 @@ if (releaseSigningEnv == null) {
     logger.lifecycle("ANKIMCP_KEYSTORE_* / ANKIMCP_KEY_* not all set: release build is unsigned")
 }
 
-val defaultTunnelUrl = "wss://tunnel.ankimcp.ai"
+val defaultTunnelUrl = "wss://ankidroid.ankimcp.ai"
 val devTunnelUrl: String =
     providers.gradleProperty("ankimcp.tunnelUrl").orElse(defaultTunnelUrl).get()
 

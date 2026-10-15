@@ -6,7 +6,7 @@ import kotlin.random.Random
 
 /** What to do after the socket closed with a given code. */
 enum class CloseDecision {
-    /** Permanent: 1000, 4002, 4004, 4005, 4010. */
+    /** Permanent: 1000, 4002, 4004, 4005, 4010, 4011. */
     STOP,
 
     /** 4001 / 4003: refresh the access token, then reconnect. */

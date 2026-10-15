@@ -11,7 +11,7 @@ through its ContentProvider. Single `app` module, package `ai.ankimcp.ankidroid`
 ./gradlew :app:testDebugUnitTest --tests 'ai.ankimcp.ankidroid.tunnel.TunnelClientTest'
 ./gradlew :app:lintDebug
 ./gradlew :app:assembleRelease                                   # R8, unsigned
-./gradlew :app:assembleDebug -Pankimcp.tunnelUrl=ws://10.0.2.2:3004   # dev relay
+./gradlew :app:assembleDebug -Pankimcp.tunnelUrl=wss://ankidroid.ankimcp.uk   # dev relay
 ```
 
 Needs JDK 17+ and Android SDK platform 36. Versions live in `gradle/libs.versions.toml`;
