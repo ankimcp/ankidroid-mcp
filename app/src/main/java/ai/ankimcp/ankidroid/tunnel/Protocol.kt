@@ -26,7 +26,14 @@ object CloseCodes {
     const val SHUTDOWN = 4009
     const val IDLE_TIMEOUT = 4010
 
-    private val NO_RECONNECT = setOf(NORMAL, TOKEN_REVOKED, ACCOUNT_DELETED, SESSION_REPLACED, IDLE_TIMEOUT)
+    /**
+     * The host does not serve this client type (wrong endpoint, e.g. the phone on the desktop
+     * tunnel). Sent as a close frame right after the upgrade.
+     */
+    const val CLIENT_KIND_MISMATCH = 4011
+
+    private val NO_RECONNECT =
+        setOf(NORMAL, TOKEN_REVOKED, ACCOUNT_DELETED, SESSION_REPLACED, IDLE_TIMEOUT, CLIENT_KIND_MISMATCH)
     private val REFRESH_TOKEN = setOf(AUTH_FAILED, TUNNEL_AUTH_FAILED)
 
     /** Everything except the permanent codes reconnects, including unknown codes. */

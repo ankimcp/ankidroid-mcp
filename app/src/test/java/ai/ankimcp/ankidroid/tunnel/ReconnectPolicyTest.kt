@@ -51,9 +51,14 @@ class ReconnectPolicyTest {
     @Test
     fun `permanent close codes stop`() {
         val policy = ReconnectPolicy()
-        listOf(1000, 4002, 4004, 4005, 4010).forEach {
+        listOf(1000, 4002, 4004, 4005, 4010, 4011).forEach {
             assertEquals("code $it", CloseDecision.STOP, policy.decide(it))
         }
+    }
+
+    @Test
+    fun `a client kind mismatch stops`() {
+        assertEquals(CloseDecision.STOP, ReconnectPolicy().decide(CloseCodes.CLIENT_KIND_MISMATCH))
     }
 
     @Test

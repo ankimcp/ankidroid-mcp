@@ -741,6 +741,7 @@ class TunnelConnection(
         CloseCodes.ACCOUNT_DELETED -> "Account deleted"
         CloseCodes.SESSION_REPLACED -> "Another device connected with this account"
         CloseCodes.IDLE_TIMEOUT -> "Disconnected after a long idle period"
+        CloseCodes.CLIENT_KIND_MISMATCH -> "This relay does not accept the AnkiDroid app. Check the app is up to date."
         else -> closed.reason
     }
 

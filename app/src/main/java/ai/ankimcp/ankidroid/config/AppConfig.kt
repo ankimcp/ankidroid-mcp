@@ -4,7 +4,7 @@ import ai.ankimcp.ankidroid.BuildConfig
 
 /** Static build-time configuration. */
 data class AppConfig(
-    /** Tunnel relay WebSocket URL, e.g. `wss://tunnel.ankimcp.ai`. */
+    /** Tunnel relay WebSocket URL, e.g. `wss://ankidroid.ankimcp.ai`. */
     val tunnelUrl: String,
     /** App versionName, sent as `x-ankimcp-client-version` and MCP `serverInfo.version`. */
     val appVersion: String,

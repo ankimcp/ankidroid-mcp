@@ -258,6 +258,22 @@ class TunnelConnectionTest {
     }
 
     @Test
+    fun `a client kind mismatch right after the upgrade stops with a readable reason`() = runTest {
+        val factory = ScriptedFactory(listOf(Step.Fail(closeCode = CloseCodes.CLIENT_KIND_MISMATCH)))
+        val store = InMemoryStore(credentials)
+        val tunnel = connection(store, factory)
+
+        tunnel.start()
+        val stopped = tunnel.awaitStopped()
+
+        assertEquals(CloseCodes.CLIENT_KIND_MISMATCH, stopped.code)
+        assertEquals("This relay does not accept the AnkiDroid app. Check the app is up to date.", stopped.reason)
+        assertFalse(stopped.reloginRequired)
+        assertEquals(1, factory.usedTokens.size)
+        assertEquals(0, store.clears)
+    }
+
+    @Test
     fun `transient close reconnects after backoff`() = runTest {
         val factory = ScriptedFactory(
             listOf(Step.EstablishThenClose(CloseCodes.SHUTDOWN), Step.EstablishThenClose(CloseCodes.NORMAL)),

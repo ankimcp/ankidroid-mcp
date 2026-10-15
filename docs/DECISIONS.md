@@ -46,8 +46,10 @@ revisit.
 - **D7. Detekt, ktlint and explicit API mode are not configured.** Explicit API mode is for
   libraries; this is a single app module. Adding detekt/ktlint is a small follow-up.
 - **D8. Tunnel URL**: `BuildConfig.TUNNEL_URL`. Debug builds read the Gradle property
-  `ankimcp.tunnelUrl` (default `wss://tunnel.ankimcp.ai`); release is hard-coded to the
-  production URL so a stray property can't ship. `network_security_config.xml` allows
+  `ankimcp.tunnelUrl` (default `wss://ankidroid.ankimcp.ai`, the app's own relay deployment;
+  dev is `wss://ankidroid.ankimcp.uk`); release is hard-coded to the production URL so a
+  stray property can't ship. The desktop add-on stays on `wss://tunnel.ankimcp.ai`, which
+  refuses the phone with 4011 once the AnkiDroid deployment ships (docs/PROTOCOL.md). `network_security_config.xml` allows
   cleartext only to `10.0.2.2`, `localhost` and `127.0.0.1` (dev relay over `ws://`); it is in
   the main source set, so release builds permit it too (harmless: release never uses those hosts).
 - **D9. Release** has R8 + resource shrinking enabled and builds unsigned; signing config and
@@ -647,4 +649,5 @@ gets frozen too.
   not been checked on a launcher or in dark mode yet.
 - No Play listing assets, privacy policy or data-safety form (the
   data-safety form will need to declare the FCM token, see D39).
-- The relay's `ClientTypeSchema` does not know `ankidroid` yet (harmless, see PROTOCOL.md).
+- The relay accepts `x-ankimcp-client-type: ankidroid` (shared-types 0.18.1) and serves it on
+  the dedicated `ankidroid.ankimcp.*` host; deployed on dev, production pending (PROTOCOL.md).

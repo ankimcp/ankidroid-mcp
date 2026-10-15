@@ -15,11 +15,16 @@ Code: `app/src/main/java/ai/ankimcp/ankidroid/tunnel/Protocol.kt`, `TunnelClient
 
 | What | URL |
 |---|---|
-| WebSocket | `wss://tunnel.ankimcp.ai` (root path) |
-| Device code | `POST https://tunnel.ankimcp.ai/auth/device` |
-| Token / refresh | `POST https://tunnel.ankimcp.ai/auth/token` |
-| Push token | `PUT` / `DELETE https://tunnel.ankimcp.ai/devices/push` |
-| MCP URL for Claude | `https://tunnel.ankimcp.ai/mcp` (sent by the relay in `tunnel_established`) |
+| WebSocket | `wss://ankidroid.ankimcp.ai` (root path) |
+| Device code | `POST https://ankidroid.ankimcp.ai/auth/device` |
+| Token / refresh | `POST https://ankidroid.ankimcp.ai/auth/token` |
+| Push token | `PUT` / `DELETE https://ankidroid.ankimcp.ai/devices/push` |
+| MCP URL for Claude | `https://ankidroid.ankimcp.ai/mcp` (sent by the relay in `tunnel_established`) |
+
+The app has its own relay deployment: `wss://ankidroid.ankimcp.ai` in production,
+`wss://ankidroid.ankimcp.uk` for development, with the same paths as the desktop add-on's
+`wss://tunnel.ankimcp.ai`. Once that deployment ships, the shared `tunnel.ankimcp.*` hosts
+refuse the phone with close code 4011 (see Close codes).
 
 The HTTPS base is derived from the WebSocket URL by swapping the scheme only
 (`wss://` -> `https://`, `ws://` -> `http://`), exactly like the add-on's `_ws_url_to_http`.
@@ -84,7 +89,7 @@ Otherwise the attempt fails.
 All frames are JSON objects with a `type` discriminator. Unknown extra fields are ignored.
 
 ```json
-{"type":"tunnel_established","url":"https://tunnel.ankimcp.ai/mcp"}
+{"type":"tunnel_established","url":"https://ankidroid.ankimcp.ai/mcp"}
 {"type":"request","requestId":"r1","method":"POST","path":"/mcp","headers":{...},"body":"<JSON-RPC message as a string>"}
 {"type":"ping","timestamp":1704063600000}
 {"type":"error","code":"invalid_message","message":"...","details":...}
@@ -141,9 +146,16 @@ while connected (at most every ~15 min in deep Doze; see docs/DECISIONS.md D27/D
 | 4008 | SERVICE_UNAVAILABLE | reconnect with backoff |
 | 4009 | SHUTDOWN | reconnect with backoff |
 | 4010 | IDLE_TIMEOUT | stop |
+| 4011 | CLIENT_KIND_MISMATCH | stop ("This relay does not accept the AnkiDroid app. Check the app is up to date.") |
 | other | | reconnect with backoff |
 
 Socket failures without a close frame are treated as 1001.
+
+4011 is sent as a close frame right after a successful 101 upgrade, with the reason
+`Client type not served by this host`, when the client connects to a host that does not serve
+its client type (the phone on `tunnel.ankimcp.*`). It arrives before `tunnel_established`, so
+the handshake close-code rule (Deviations 2) applies; the stop needs no new sign-in and clears
+nothing.
 
 ### Reconnect
 
@@ -264,9 +276,10 @@ collection adds `"message": "No decks found in AnkiDroid"`.
 
 ## Deviations from the add-on
 
-1. **Client type** is `ankidroid`. The relay's `ClientTypeSchema` is currently
-   `cli | addon`, so the value is parsed as `undefined` and ignored (connection still
-   accepted). Adding `ankidroid` to the schema is a relay-side follow-up.
+1. **Client type** is `ankidroid`. The relay accepts `x-ankimcp-client-type: ankidroid`
+   (`ClientTypeSchema` in shared-types 0.18.1, on dev since 2026-10-15), keys connection slots
+   by client type, and serves this client on the dedicated host (`ankidroid.ankimcp.*`, see
+   Endpoints), not the add-on's `tunnel.ankimcp.*`.
 2. **Close during handshake**: if the relay closes the socket with a code before
    `tunnel_established` (e.g. 4003 on a bad token, 4008), the add-on treats it as a generic
    connection failure. This app applies the close-code table instead, so 4003 at handshake
