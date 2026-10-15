@@ -8,6 +8,7 @@ import ai.ankimcp.ankidroid.log.TunnelLog
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -45,9 +46,10 @@ sealed interface TunnelState {
 
     /**
      * Stopped for good until the user connects again (or a push wake-up arrives).
-     * [idleTimeout] means the on-demand idle window passed without a request. [signedOut] (with
-     * [reloginRequired]) means there were no credentials at all, e.g. after a deliberate sign-out,
-     * as opposed to a session that expired or was revoked.
+     * [idleTimeout] means the on-demand idle window passed without a request. [phoneAsleep] means
+     * the on-demand session ended because the screen turned off or the app was frozen.
+     * [signedOut] (with [reloginRequired]) means there were no credentials at all, e.g. after a
+     * deliberate sign-out, as opposed to a session that expired or was revoked.
      */
     data class Stopped(
         val code: Int,
@@ -55,6 +57,7 @@ sealed interface TunnelState {
         val reloginRequired: Boolean = false,
         val idleTimeout: Boolean = false,
         val signedOut: Boolean = false,
+        val phoneAsleep: Boolean = false,
     ) : TunnelState
 }
 
@@ -80,7 +83,11 @@ fun interface TunnelSessionFactory {
  *    [elapsedClock]) since [start] or the last `request` frame. A coroutine timer catches the
  *    deadline while the CPU is awake and an [idleWakeups] alarm catches it in Doze;
  *  - when the stored credentials are cleared by someone else (sign-out), the run stops as
- *    "Not signed in".
+ *    "Not signed in";
+ *  - while the idle timer is enabled (on demand with working wake-ups), the run also stops when
+ *    the screen turns off ([onScreenOff]) or when a tick on [uptimeClock] comes much later than
+ *    scheduled, i.e. the OS froze the process;
+ *  - a push wake-up while it looks connected drops the socket and reconnects ([onPushWake]).
  */
 class TunnelConnection(
     private val scope: CoroutineScope,
@@ -98,6 +105,12 @@ class TunnelConnection(
     private val idleTimeoutMs: () -> Long? = { null },
     private val idleWakeups: WakeupScheduler = WakeupScheduler.None,
     private val elapsedClock: ElapsedClock = ElapsedClock.Monotonic,
+    /** Stops while the CPU sleeps (`uptimeMillis`), so only a frozen process sees a late tick on it. */
+    private val uptimeClock: ElapsedClock = ElapsedClock.Monotonic,
+    /** Called with the frozen time when a freeze worth telling the user about is detected (see [onFreezeDetected]). */
+    private val onFrozen: (frozenMs: Long) -> Unit = {},
+    /** Whether the screen is on (`PowerManager.isInteractive`), sampled by the freeze watch. */
+    private val isScreenOn: () -> Boolean = { true },
 ) {
     private val _state = MutableStateFlow<TunnelState>(TunnelState.Idle)
     val state: StateFlow<TunnelState> = _state.asStateFlow()
@@ -124,6 +137,17 @@ class TunnelConnection(
     /** False when [lastActivityMs] was last set by a settings change rather than a request frame. */
     private var lastActivityWasRequest = false
     private var idleTimerJob: Job? = null
+    private var freezeWatchJob: Job? = null
+
+    /** Bumped whenever the freeze watch is (re)started or cancelled; a tick from an older watch is ignored. */
+    private var freezeWatchId = 0L
+    private var screenOffStopJob: Job? = null
+
+    /** When the current run last published Connected, on [elapsedClock]. */
+    private var connectedAtMs = Long.MIN_VALUE / 2
+
+    /** When the current run last received a `request` frame, on [elapsedClock]. */
+    private var lastRequestFrameMs = Long.MIN_VALUE / 2
 
     /**
      * The run that may be clearing the credentials itself (refresh token rejected, access
@@ -165,6 +189,7 @@ class TunnelConnection(
             lastActivityMs = elapsedClock.elapsedMs()
             lastActivityWasRequest = false
             armIdleLocked(gen)
+            launchFreezeWatchLocked(gen)
         }
     }
 
@@ -234,6 +259,82 @@ class TunnelConnection(
     }
 
     /**
+     * The screen turned off. An on-demand session that a wake-up can bring back ends, like an
+     * idle timeout: OEM freezers stop the process soon after, and a frozen socket only looks
+     * alive to the relay. Requests in flight may finish first, for up to the 25 s request budget,
+     * under a wake lock. Nothing reconnects when the screen turns on again (D41), but turning it
+     * on before the stop calls the stop off.
+     */
+    fun onScreenOff() {
+        synchronized(lock) {
+            if (job?.isActive != true || idleTimeoutMs() == null) return
+            if (screenOffStopJob?.isActive == true) return
+            val gen = generation
+            val session = activeSession?.takeIf { _state.value is TunnelState.Connected }
+            log.info("Screen off: ending the on-demand session")
+            screenOffStopJob = scope.launch {
+                val self = coroutineContext.job
+                if (session != null) {
+                    wakeLocks.acquire("screen-off", ProtocolConstants.REQUEST_TIMEOUT_MS + WAKE_LOCK_SLACK_MS).use {
+                        withTimeoutOrNull(ProtocolConstants.REQUEST_TIMEOUT_MS) { session.awaitRequestsIdle() }
+                    }
+                }
+                // A screen-on that cleared the job meanwhile (even while this ran) wins.
+                endWhileAsleep(gen, "Screen turned off") { screenOffStopJob === self }
+            }
+        }
+    }
+
+    /** The screen turned on: a screen-off stop still waiting for requests is called off. */
+    fun onScreenOn() {
+        synchronized(lock) {
+            if (screenOffStopJob?.isActive != true) return
+            screenOffStopJob?.cancel()
+            screenOffStopJob = null
+        }
+        log.info("Screen on again, staying connected")
+    }
+
+    /**
+     * A push wake-up arrived while a run is going. The relay only sends one when it has no
+     * connection for this account, so a run that looks connected holds a dead socket (typically
+     * the app was frozen and has just been thawed by the wake-up): it is dropped and the run
+     * reconnects at once. It is kept if it shows signs of life: it connected or received a
+     * request frame less than [RECENT_ACTIVITY_MS] ago, or a request is in flight (the wake-up
+     * crossed a new connection, and FCM can take seconds to deliver). Otherwise the backoff is
+     * cut short. The freeze watch restarts
+     * from now, and a stop its overdue tick already decided is dropped (see [endWhileAsleep]),
+     * so it cannot end the run this wake-up is reviving.
+     *
+     * @return false if no run is going (e.g. a freeze stop got there first): the caller starts one.
+     */
+    fun onPushWake(): Boolean {
+        val session: TunnelSession?
+        val alive: Boolean
+        synchronized(lock) {
+            if (job?.isActive != true) return false
+            releaseWakeupHoldLocked()
+            wakeupHold = wakeLocks.acquire("wakeup", WAKEUP_HOLD_MS)
+            launchFreezeWatchLocked(generation)
+            session = activeSession?.takeIf { _state.value is TunnelState.Connected }
+            val now = elapsedClock.elapsedMs()
+            alive = session != null &&
+                (now - connectedAtMs < RECENT_ACTIVITY_MS || now - lastRequestFrameMs < RECENT_ACTIVITY_MS)
+        }
+        when {
+            alive || session?.hasRequestsInFlight() == true ->
+                log.info("Woken while a fresh or busy connection is up, keeping it")
+            session != null -> {
+                log.info("Woken while connected: the relay has no connection, reconnecting")
+                session.abort("Relay has no connection")
+                nudges.trySend(Unit)
+            }
+            else -> nudges.trySend(Unit)
+        }
+        return true
+    }
+
+    /**
      * The idle window setting changed. A running timer restarts its countdown from now with the
      * new window (or stops if the idle timer is now disabled).
      */
@@ -286,7 +387,10 @@ class TunnelConnection(
                         authRetryAvailable = true
                         // A nudge that arrived while connecting must not skip the next disconnect's backoff.
                         nudges.tryReceive()
-                        if (publish(gen, TunnelState.Connected(url))) scheduleWakeup(gen, LIVENESS_CHECK_MS)
+                        if (publish(gen, TunnelState.Connected(url))) {
+                            synchronized(lock) { connectedAtMs = elapsedClock.elapsedMs() }
+                            scheduleWakeup(gen, LIVENESS_CHECK_MS)
+                        }
                         attemptLock.close()
                     },
                     { onRequestFrame(gen) },
@@ -430,10 +534,12 @@ class TunnelConnection(
         stopped: TunnelState.Stopped,
         idleSinceMs: Long? = null,
         credentialsCleared: Boolean = false,
+        stillWanted: () -> Boolean = { true },
     ): Boolean {
         val (stoppedJob, session) = synchronized(lock) {
             val current = job?.takeIf { it.isActive } ?: return false
             if (expectedGeneration != null && expectedGeneration != generation) return false
+            if (!stillWanted()) return false
             if (credentialsCleared && selfClearingGeneration == generation) return false
             if (idleSinceMs != null && lastActivityMs != idleSinceMs) {
                 log.info(if (lastActivityWasRequest) "A request arrived, staying connected" else "Idle settings changed, staying connected")
@@ -447,6 +553,7 @@ class TunnelConnection(
             releaseWakeupHoldLocked()
             wakeups.cancel()
             disarmIdleLocked()
+            cancelSleepJobsLocked()
             _state.value = stopped
             current to session
         }
@@ -461,6 +568,7 @@ class TunnelConnection(
             if (gen != generation) return
             lastActivityMs = elapsedClock.elapsedMs()
             lastActivityWasRequest = true
+            lastRequestFrameMs = lastActivityMs
             // The timers stay armed for the old deadline; when they fire they see the new one and re-arm.
             if (_idleDeadline.value != null) _idleDeadline.value = idleTimeoutMs()?.let { lastActivityMs + it }
         }
@@ -515,6 +623,70 @@ class TunnelConnection(
         _idleDeadline.value = null
     }
 
+    /** Ends the run of [gen] as [TunnelState.Stopped.phoneAsleep], through the same path as the idle timer. */
+    /**
+     * [stillWanted] is checked under the lock together with the generation, so a stop decided
+     * before a wake-up or a screen-on is dropped if that event came first.
+     */
+    private fun endWhileAsleep(gen: Long, reason: String, stillWanted: () -> Boolean) {
+        stopRun(
+            expectedGeneration = gen,
+            stopped = TunnelState.Stopped(CloseCodes.NORMAL, reason, phoneAsleep = true),
+            stillWanted = stillWanted,
+        )
+    }
+
+    /**
+     * Ticks every [FREEZE_TICK_MS] of coroutine time for as long as the run lasts. Coroutine time
+     * and [uptimeClock] both stop while the CPU sleeps, so they only drift apart when the process
+     * was frozen while the CPU ran (OEM background freezers).
+     */
+    private fun launchFreezeWatchLocked(gen: Long) {
+        freezeWatchJob?.cancel()
+        val watch = ++freezeWatchId
+        freezeWatchJob = scope.launch {
+            var last = uptimeClock.elapsedMs()
+            var screenWasOn = isScreenOn()
+            while (true) {
+                delay(FREEZE_TICK_MS)
+                val now = uptimeClock.elapsedMs()
+                val screenOn = isScreenOn()
+                val sinceLast = now - last
+                last = now
+                if (sinceLast > FREEZE_TICK_MS + FROZEN_THRESHOLD_MS) {
+                    onFreezeDetected(gen, watch, sinceLast - FREEZE_TICK_MS, screenOffDuringFreeze = !screenWasOn || !screenOn)
+                }
+                screenWasOn = screenOn
+            }
+        }
+    }
+
+    private fun cancelSleepJobsLocked() {
+        freezeWatchJob?.cancel()
+        freezeWatchJob = null
+        freezeWatchId++
+        screenOffStopJob?.cancel()
+        screenOffStopJob = null
+    }
+
+    /**
+     * [onFrozen] (the battery note) is skipped for the expected on-demand case: a session that
+     * would end on a freeze anyway, frozen while the screen was off. A freeze in a session that
+     * stays up (always connected, or no wake-ups), or one with the screen on, is reported.
+     */
+    private fun onFreezeDetected(gen: Long, watch: Long, frozenMs: Long, screenOffDuringFreeze: Boolean) {
+        val endSession = synchronized(lock) {
+            if (gen != generation || watch != freezeWatchId || job?.isActive != true) return
+            idleTimeoutMs() != null
+        }
+        log.warn("The phone froze the app for ${frozenMs / 1000}s")
+        if (!endSession || !screenOffDuringFreeze) onFrozen(frozenMs)
+        if (endSession) {
+            log.info("Ending the on-demand session after the freeze; the next request wakes the phone")
+            endWhileAsleep(gen, "Phone froze the app while the screen was off") { watch == freezeWatchId }
+        }
+    }
+
     private fun publish(gen: Long, state: TunnelState): Boolean = synchronized(lock) {
         if (gen != generation) return false
         _state.value = state
@@ -527,6 +699,7 @@ class TunnelConnection(
             releaseWakeupHoldLocked()
             wakeups.cancel()
             disarmIdleLocked()
+            cancelSleepJobsLocked()
             _state.value = stopped
         }
         log.info("Tunnel stopped: ${stopped.reason}")
@@ -583,6 +756,21 @@ class TunnelConnection(
 
         /** While connected, an alarm re-runs the liveness check this often. */
         const val LIVENESS_CHECK_MS = ProtocolConstants.HEALTH_CHECK_TIMEOUT_MS
+
+        /** Freeze watch cadence: the relay's ping interval. */
+        const val FREEZE_TICK_MS = ProtocolConstants.HEARTBEAT_INTERVAL_MS
+
+        /**
+         * A tick this much later than scheduled counts as a freeze. Long enough that the relay
+         * (which drops a socket one ping interval after a missed pong) has given up on us.
+         */
+        const val FROZEN_THRESHOLD_MS = ProtocolConstants.HEALTH_CHECK_TIMEOUT_MS
+
+        /**
+         * A wake-up this soon after connecting or after a request frame crossed a live
+         * connection; it is kept. Generous because FCM delivery itself can take seconds.
+         */
+        const val RECENT_ACTIVITY_MS = 10_000L
 
         private const val WAKE_LOCK_SLACK_MS = 2_000L
         private const val NO_GENERATION = -1L

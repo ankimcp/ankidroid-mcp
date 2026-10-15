@@ -60,6 +60,7 @@ private fun AppRoot(viewModel: MainViewModel) {
     val wakeUpsReady by viewModel.wakeUpsReady.collectAsStateWithLifecycle()
     val idleDisconnectAt by viewModel.idleDisconnectAt.collectAsStateWithLifecycle()
     val signingOut by viewModel.signingOut.collectAsStateWithLifecycle()
+    val freezeDetected by viewModel.freezeDetected.collectAsStateWithLifecycle()
     val logEntries by viewModel.logEntries.collectAsStateWithLifecycle()
 
     LifecycleResumeEffect(Unit) {
@@ -133,7 +134,11 @@ private fun AppRoot(viewModel: MainViewModel) {
                     wakeUpsReady = wakeUpsReady,
                     idleDisconnectAt = idleDisconnectAt,
                 ),
-                batteryUnrestricted = environment.batteryUnrestricted,
+                battery = BatteryUi(
+                    unrestricted = environment.batteryUnrestricted,
+                    oem = viewModel.freezingOem,
+                    freezeDetected = freezeDetected,
+                ),
                 notificationsShown = environment.notificationsShown,
                 logEntries = logEntries,
                 signingOut = signingOut,
@@ -141,6 +146,7 @@ private fun AppRoot(viewModel: MainViewModel) {
                 onDisconnect = viewModel::disconnect,
                 onModeChange = viewModel::setConnectionMode,
                 onIdleWindowChange = viewModel::setIdleWindow,
+                onDismissFreezeNotice = viewModel::dismissFreezeNotice,
                 onLogout = viewModel::logout,
                 modifier = contentModifier,
             )

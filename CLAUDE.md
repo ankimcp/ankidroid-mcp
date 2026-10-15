@@ -26,10 +26,12 @@ app/src/main/java/ai/ankimcp/ankidroid/
   AnkiMcpApp.kt, AppGraph.kt   manual DI; AppGraph owns the long-lived objects
   config/      AppConfig (BuildConfig.TUNNEL_URL, version)
   settings/    ConnectionSettings (ConnectionMode OnDemand/Always, IdleWindow 15/30/60,
-               migrates the old keep_connected flag), KeyValueStore (SharedPreferences seam)
+               migrates the old keep_connected flag), FreezeNotice (persisted "phone froze us"
+               flag), KeyValueStore (SharedPreferences seam)
   auth/        DeviceFlowClient, Credentials, CredentialStore (Keystore AES-GCM), TokenRefresher
-  tunnel/      Protocol (messages, close codes), TunnelClient (OkHttp WS, one connection),
-               ReconnectPolicy, TunnelConnection (reconnect state machine + idle timer),
+  tunnel/      Protocol (messages, close codes), TunnelClient (OkHttp WS, one connection,
+               freeze-aware ping watchdog), ReconnectPolicy, TunnelConnection (reconnect state
+               machine + idle timer + screen-off/freeze stop),
                WakeSupport (ElapsedClock, WakeLocks, WakeupScheduler interfaces)
   push/        PushMessaging (Firebase seam) + FirebasePushMessaging, PushTokenRegistrar
                (/devices/push), PushRegistrationState(+Store), PushCoordinator (when to
@@ -40,7 +42,8 @@ app/src/main/java/ai/ankimcp/ankidroid/
                AnkiDroidRepository, AnkiDroidAvailability
   tools/       ListDecksTool
   service/     TunnelForegroundService (specialUse FGS), BootReceiver, NetworkMonitor,
-               AndroidWakeSupport (elapsedRealtime, wake locks, while-idle alarms + receiver),
+               ScreenMonitor (screen off/on broadcasts), FreezingOem (OEM skins that freeze apps),
+               AndroidWakeSupport (elapsedRealtime, uptime, wake locks, while-idle alarms + receiver),
                SignInNotifications ("Sign in again" notification), NotificationPermission
                (permission, app switch and channel check per notification, logs dropped ones)
   ui/          MainActivity, MainViewModel, Onboarding/SignIn/Status screens, Theme

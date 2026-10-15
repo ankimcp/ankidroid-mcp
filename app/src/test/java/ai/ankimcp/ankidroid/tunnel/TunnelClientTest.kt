@@ -91,6 +91,7 @@ class TunnelClientTest {
         healthTimeoutMs: Long = 60_000,
         requestTimeoutMs: Long = 5_000,
         clock: ElapsedClock = ElapsedClock.Monotonic,
+        uptimeClock: ElapsedClock = ElapsedClock.Monotonic,
         wakeLocks: WakeLocks = WakeLocks.None,
     ) = TunnelClient(
         http = http,
@@ -107,6 +108,7 @@ class TunnelClientTest {
         heartbeatIntervalMs = heartbeatIntervalMs,
         healthTimeoutMs = healthTimeoutMs,
         requestTimeoutMs = requestTimeoutMs,
+        uptimeClock = uptimeClock,
     )
 
     private fun nextMessage(): JsonObject {
@@ -466,6 +468,199 @@ class TunnelClientTest {
         assertFalse(tunnel.checkHealth())
 
         assertEquals(CloseCodes.GOING_AWAY, withTimeout(5_000) { run.await() }.code)
+    }
+
+    @Test
+    fun `a check after a freeze waits for the queued ping instead of dropping the socket`() = runBlocking {
+        val now = AtomicLong(0)
+        val uptime = AtomicLong(0)
+        val established = CompletableFuture<String>()
+        enqueueRelay { ws -> establish(ws) }
+        val tunnel = client(
+            clock = { now.get() },
+            uptimeClock = { uptime.get() },
+            onEstablished = { established.complete(it) },
+        )
+        val run = async(Dispatchers.IO) { tunnel.run() }
+        established.get(5, TimeUnit.SECONDS)
+
+        // Frozen for 76 s while the CPU ran: both clocks moved, the server's ping is still queued.
+        now.set(76_000)
+        uptime.set(76_000)
+        assertTrue(tunnel.checkHealth())
+
+        serverSocket.get(1, TimeUnit.SECONDS).send("""{"type":"ping","timestamp":1}""")
+        assertEquals("pong", nextMessage()["type"]!!.jsonPrimitive.content)
+        now.set(76_000 + 59_000)
+        uptime.set(76_000 + 30_000)
+        assertTrue(tunnel.checkHealth())
+        assertTrue(run.isActive)
+
+        tunnel.disconnect()
+        assertEquals(CloseCodes.NORMAL, withTimeout(5_000) { run.await() }.code)
+    }
+
+    @Test
+    fun `a 45 s pause after an on-time check still counts as a freeze`() = runBlocking {
+        val now = AtomicLong(0)
+        val uptime = AtomicLong(0)
+        val established = CompletableFuture<String>()
+        enqueueRelay { ws -> establish(ws) }
+        val tunnel = client(
+            clock = { now.get() },
+            uptimeClock = { uptime.get() },
+            onEstablished = { established.complete(it) },
+        )
+        val run = async(Dispatchers.IO) { tunnel.run() }
+        established.get(5, TimeUnit.SECONDS)
+
+        now.set(31_000)
+        uptime.set(31_000)
+        assertTrue(tunnel.checkHealth())
+
+        // Frozen right after that check: the next one runs 45 s later with pings 76 s overdue.
+        now.set(76_000)
+        uptime.set(76_000)
+        assertTrue(tunnel.checkHealth())
+        assertTrue(run.isActive)
+
+        tunnel.disconnect()
+        assertEquals(CloseCodes.NORMAL, withTimeout(5_000) { run.await() }.code)
+    }
+
+    @Test
+    fun `an on-time check with overdue pings is not a freeze`() = runBlocking {
+        val now = AtomicLong(0)
+        val uptime = AtomicLong(0)
+        val established = CompletableFuture<String>()
+        enqueueRelay { ws -> establish(ws) }
+        val tunnel = client(
+            clock = { now.get() },
+            uptimeClock = { uptime.get() },
+            onEstablished = { established.complete(it) },
+        )
+        val run = async(Dispatchers.IO) { tunnel.run() }
+        established.get(5, TimeUnit.SECONDS)
+
+        now.set(30_000)
+        uptime.set(30_000)
+        assertTrue(tunnel.checkHealth())
+        now.set(60_001)
+        uptime.set(60_001)
+        assertFalse(tunnel.checkHealth())
+
+        assertEquals(CloseCodes.GOING_AWAY, withTimeout(5_000) { run.await() }.code)
+    }
+
+    @Test
+    fun `requests in flight are awaited`() = runBlocking {
+        val release = CompletableDeferred<Unit>()
+        val started = CompletableDeferred<Unit>()
+        enqueueRelay { ws ->
+            establish(ws)
+            ws.send(
+                """{"type":"request","requestId":"r1","method":"POST","path":"/mcp","headers":{},""" +
+                    """"body":"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}"}""",
+            )
+        }
+        val tunnel = client(
+            handler = JsonRpcHandler { _, _ ->
+                started.complete(Unit)
+                release.await()
+                """{"jsonrpc":"2.0","id":1,"result":{}}"""
+            },
+        )
+        val run = async(Dispatchers.IO) { tunnel.run() }
+        withTimeout(5_000) { started.await() }
+
+        val idle = async { tunnel.awaitRequestsIdle() }
+        delay(100)
+        assertTrue("a request is still being handled", idle.isActive)
+        assertTrue(tunnel.hasRequestsInFlight())
+
+        release.complete(Unit)
+        withTimeout(5_000) { idle.await() }
+        assertFalse(tunnel.hasRequestsInFlight())
+        assertEquals("response", nextMessage()["type"]!!.jsonPrimitive.content)
+
+        tunnel.disconnect()
+        withTimeout(5_000) { run.await() }
+        Unit
+    }
+
+    @Test
+    fun `a request that throws no longer counts as in flight`() = runBlocking {
+        enqueueRelay { ws ->
+            establish(ws)
+            ws.send(
+                """{"type":"request","requestId":"r1","method":"POST","path":"/mcp","headers":{},""" +
+                    """"body":"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}"}""",
+            )
+        }
+        val tunnel = client(handler = JsonRpcHandler { _, _ -> throw IllegalStateException("boom") })
+        val run = async(Dispatchers.IO) { tunnel.run() }
+
+        assertEquals(500, nextMessage()["statusCode"]!!.jsonPrimitive.int)
+        withTimeout(5_000) { tunnel.awaitRequestsIdle() }
+
+        tunnel.disconnect()
+        withTimeout(5_000) { run.await() }
+        Unit
+    }
+
+    @Test
+    fun `a request cancelled with the socket no longer counts as in flight`() = runBlocking {
+        val started = CompletableDeferred<Unit>()
+        enqueueRelay { ws ->
+            establish(ws)
+            ws.send(
+                """{"type":"request","requestId":"r1","method":"POST","path":"/mcp","headers":{},""" +
+                    """"body":"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}"}""",
+            )
+        }
+        val tunnel = client(
+            handler = JsonRpcHandler { _, _ ->
+                started.complete(Unit)
+                awaitCancellation()
+            },
+        )
+        val run = async(Dispatchers.IO) { tunnel.run() }
+        withTimeout(5_000) { started.await() }
+
+        tunnel.abort("Network changed")
+        withTimeout(5_000) { run.await() }
+        withTimeout(5_000) { tunnel.awaitRequestsIdle() }
+    }
+
+    @Test
+    fun `a freeze buys one heartbeat of grace, then a silent server is dropped`() = runBlocking {
+        val now = AtomicLong(0)
+        val uptime = AtomicLong(0)
+        val established = CompletableFuture<String>()
+        enqueueRelay { ws -> establish(ws) }
+        val tunnel = client(
+            clock = { now.get() },
+            uptimeClock = { uptime.get() },
+            onEstablished = { established.complete(it) },
+        )
+        val run = async(Dispatchers.IO) { tunnel.run() }
+        established.get(5, TimeUnit.SECONDS)
+
+        now.set(76_000)
+        uptime.set(76_000)
+        assertTrue("first check after the freeze grants grace", tunnel.checkHealth())
+        now.set(100_000)
+        uptime.set(100_000)
+        assertTrue("still within the heartbeat of grace", tunnel.checkHealth())
+
+        // Another freeze, but no ping arrived since the first one: no second grace.
+        now.set(106_001)
+        uptime.set(200_000)
+        assertFalse(tunnel.checkHealth())
+
+        val closed = withTimeout(5_000) { run.await() }
+        assertEquals(CloseCodes.GOING_AWAY, closed.code)
+        assertTrue(closed.reason, closed.reason.contains("No server ping in 106s"))
     }
 
     @Test

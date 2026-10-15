@@ -23,14 +23,17 @@ import ai.ankimcp.ankidroid.push.WorkManagerQueue
 import ai.ankimcp.ankidroid.service.AlarmWakeupScheduler
 import ai.ankimcp.ankidroid.service.AndroidElapsedClock
 import ai.ankimcp.ankidroid.service.AndroidSignInNotifier
+import ai.ankimcp.ankidroid.service.AndroidUptimeClock
 import ai.ankimcp.ankidroid.service.AndroidWakeLocks
 import ai.ankimcp.ankidroid.service.NetworkMonitor
 import ai.ankimcp.ankidroid.service.NotificationPermissionGate
+import ai.ankimcp.ankidroid.service.ScreenMonitor
 import ai.ankimcp.ankidroid.service.TunnelAlarmReceiver
 import ai.ankimcp.ankidroid.service.TunnelForegroundService
 import ai.ankimcp.ankidroid.service.notificationBlockReason
 import ai.ankimcp.ankidroid.settings.ConnectionMode
 import ai.ankimcp.ankidroid.settings.ConnectionSettings
+import ai.ankimcp.ankidroid.settings.FreezeNotice
 import ai.ankimcp.ankidroid.settings.IdleWindow
 import ai.ankimcp.ankidroid.settings.SharedPreferencesKeyValueStore
 import ai.ankimcp.ankidroid.tools.ListDecksTool
@@ -40,6 +43,7 @@ import ai.ankimcp.ankidroid.tunnel.TunnelClient
 import ai.ankimcp.ankidroid.tunnel.TunnelConnection
 import ai.ankimcp.ankidroid.tunnel.TunnelSessionFactory
 import android.content.Context
+import android.os.PowerManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
@@ -55,9 +59,10 @@ class AppGraph(context: Context) {
     private val appContext = context.applicationContext
 
     val config: AppConfig = AppConfig.fromBuildConfig()
-    val settings = ConnectionSettings(
-        SharedPreferencesKeyValueStore(appContext.getSharedPreferences(ConnectionSettings.PREFS_NAME, Context.MODE_PRIVATE)),
-    )
+    private val settingsStore =
+        SharedPreferencesKeyValueStore(appContext.getSharedPreferences(ConnectionSettings.PREFS_NAME, Context.MODE_PRIVATE))
+    val settings = ConnectionSettings(settingsStore)
+    val freezeNotice = FreezeNotice(settingsStore)
     val log = TunnelLog()
     val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
@@ -98,6 +103,7 @@ class AppGraph(context: Context) {
     )
 
     val networkMonitor = NetworkMonitor(appContext)
+    val screenMonitor = ScreenMonitor(appContext)
 
     private val wakeLocks = AndroidWakeLocks(appContext)
 
@@ -140,6 +146,7 @@ class AppGraph(context: Context) {
                 wakeLocks = wakeLocks,
                 onEstablished = onEstablished,
                 onRequest = onRequest,
+                uptimeClock = AndroidUptimeClock,
             )
         },
         policy = ReconnectPolicy(),
@@ -155,6 +162,9 @@ class AppGraph(context: Context) {
             action = TunnelAlarmReceiver.ACTION_IDLE_DEADLINE,
         ),
         elapsedClock = AndroidElapsedClock,
+        uptimeClock = AndroidUptimeClock,
+        onFrozen = { freezeNotice.markDetected() },
+        isScreenOn = { appContext.getSystemService(PowerManager::class.java).isInteractive },
     )
 
     init {
@@ -212,8 +222,8 @@ internal fun buildWakeHandler(
     isSigningOut = { push.isSigningOut },
     startService = { startService(true) },
     startTunnel = tunnel::start,
-    stopTunnel = { tunnel.stop("Signing out") },
-    nudgeTunnel = tunnel::onWakeup,
+    stopTunnel = tunnel::stop,
+    wakeRunningTunnel = tunnel::onPushWake,
     notifier = notifier,
     log = log,
 )

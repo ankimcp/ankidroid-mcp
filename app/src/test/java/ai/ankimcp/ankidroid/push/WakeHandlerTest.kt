@@ -1,6 +1,7 @@
 package ai.ankimcp.ankidroid.push
 
 import ai.ankimcp.ankidroid.log.TunnelLog
+import ai.ankimcp.ankidroid.service.SERVICE_START_BLOCKED_REASON
 import ai.ankimcp.ankidroid.tunnel.CloseCodes
 import ai.ankimcp.ankidroid.tunnel.TunnelState
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -37,6 +38,11 @@ class WakeHandlerTest {
     private var tunnelStarts = 0
     private var tunnelStops = 0
     private var nudges = 0
+    private val calls = mutableListOf<String>()
+    private var stateAtServiceStart: TunnelState? = null
+
+    /** What the tunnel's onPushWake returns: false when the run ended between the checks. */
+    private var runningTunnelAnswers = true
     private val notifier = RecordingNotifier()
     private val log = TunnelLog(mirrorToLogcat = false)
 
@@ -48,34 +54,54 @@ class WakeHandlerTest {
         isSigningOut = { signingOut },
         startService = {
             serviceStarts++
+            calls += "service"
+            stateAtServiceStart = tunnelState.value
             onServiceStart()
             serviceStartAllowed
         },
         startTunnel = {
             tunnelStarts++
+            calls += "tunnel"
             running = true
             tunnelState.value = TunnelState.Connecting(0)
         },
-        stopTunnel = {
+        stopTunnel = { reason ->
             tunnelStops++
             running = false
-            tunnelState.value = TunnelState.Stopped(CloseCodes.NORMAL, "Signing out")
+            tunnelState.value = TunnelState.Stopped(CloseCodes.NORMAL, reason)
         },
-        nudgeTunnel = { nudges++ },
+        wakeRunningTunnel = {
+            nudges++
+            runningTunnelAnswers
+        },
         notifier = notifier,
         log = log,
     )
 
     @Test
-    fun `an open session makes the wake-up a no-op`() = runTest {
+    fun `a session that looks open is revived, not left alone`() = runTest {
         running = true
         tunnelState.value = TunnelState.Connected("https://tunnel.example/mcp")
 
-        assertEquals(WakeHandler.Outcome.AlreadyConnected, handler().onMessage(wake))
+        assertEquals(WakeHandler.Outcome.Reconnected, handler().onMessage(wake))
 
         assertEquals(0, serviceStarts)
         assertEquals(0, tunnelStarts)
-        assertEquals(0, nudges)
+        assertEquals(1, nudges)
+    }
+
+    @Test
+    fun `a run that ends between the running check and the revive is started again`() = runTest {
+        running = true
+        tunnelState.value = TunnelState.Connected("https://tunnel.example/mcp")
+        // A freeze stop got in after isTunnelRunning() said true.
+        runningTunnelAnswers = false
+
+        assertEquals(WakeHandler.Outcome.Started, handler().onMessage(wake))
+
+        assertEquals(1, nudges)
+        assertEquals(1, serviceStarts)
+        assertEquals(1, tunnelStarts)
     }
 
     @Test
@@ -172,7 +198,7 @@ class WakeHandlerTest {
 
     @Test
     fun `a logout that begins after the signing-out check stops the run the wake-up started`() = runTest {
-        // beginLogout() lands between the entry check and startTunnel().
+        // beginLogout() lands between the entry check and the check after starting.
         onServiceStart = { signingOut = true }
 
         assertEquals(WakeHandler.Outcome.SigningOut, handler().onMessage(wake))
@@ -187,13 +213,26 @@ class WakeHandlerTest {
     }
 
     @Test
-    fun `a refused service start does not start the tunnel`() = runTest {
+    fun `the tunnel starts before the service so the service never sees the previous run's stop`() = runTest {
+        tunnelState.value = TunnelState.Stopped(CloseCodes.NORMAL, "Screen turned off", phoneAsleep = true)
+
+        assertEquals(WakeHandler.Outcome.Started, handler().onMessage(wake))
+
+        assertEquals(listOf("tunnel", "service"), calls)
+        assertTrue(stateAtServiceStart is TunnelState.Connecting)
+    }
+
+    @Test
+    fun `a refused service start stops the run it started`() = runTest {
         serviceStartAllowed = false
 
         assertEquals(WakeHandler.Outcome.StartBlocked, handler().onMessage(wake))
 
         assertEquals(1, serviceStarts)
-        assertEquals(0, tunnelStarts)
+        assertEquals(1, tunnelStarts)
+        assertEquals(1, tunnelStops)
+        assertFalse(running)
+        assertEquals(SERVICE_START_BLOCKED_REASON, (tunnelState.value as TunnelState.Stopped).reason)
     }
 
     @Test

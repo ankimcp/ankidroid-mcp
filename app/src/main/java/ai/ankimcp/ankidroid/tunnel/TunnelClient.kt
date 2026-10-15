@@ -8,6 +8,9 @@ import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
@@ -21,7 +24,6 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
-import java.util.concurrent.atomic.AtomicLong
 
 /** How a connection ended. */
 data class CloseResult(val code: Int, val reason: String)
@@ -50,6 +52,12 @@ interface TunnelSession {
      * @return false if server pings stopped and the socket is being dropped.
      */
     fun checkHealth(): Boolean = true
+
+    /** Returns once no relay request is being handled (at once if none is). */
+    suspend fun awaitRequestsIdle() = Unit
+
+    /** True while a relay request is being handled. */
+    fun hasRequestsInFlight(): Boolean = false
 }
 
 /** Handles one JSON-RPC message body; returns the response body, or null for notifications. */
@@ -67,6 +75,13 @@ fun interface JsonRpcHandler {
  * server ping arrives for [healthTimeoutMs] (measured on [clock], which keeps counting while
  * the CPU sleeps) the socket is dropped and [run] returns 1001. [onRequest] is called for every
  * `request` frame before it is handled (drives the idle timer).
+ *
+ * A check that comes more than one heartbeat interval plus [FROZEN_SLACK_MS] after the previous
+ * one on [uptimeClock] (which stops while the CPU sleeps; heartbeat ticks are scheduled on the
+ * same kind of clock) means the process was frozen while the CPU ran, and the
+ * pings that arrived meanwhile may still be queued behind the check. Instead of dropping the
+ * socket, such a check gives the server one more heartbeat interval. This grace is granted once
+ * per server ping, so a socket that really went silent is still dropped.
  */
 class TunnelClient(
     private val http: OkHttpClient,
@@ -85,6 +100,7 @@ class TunnelClient(
     private val heartbeatIntervalMs: Long = ProtocolConstants.HEARTBEAT_INTERVAL_MS,
     private val healthTimeoutMs: Long = ProtocolConstants.HEALTH_CHECK_TIMEOUT_MS,
     private val requestTimeoutMs: Long = ProtocolConstants.REQUEST_TIMEOUT_MS,
+    private val uptimeClock: ElapsedClock = ElapsedClock.Monotonic,
 ) : TunnelSession {
 
     private sealed interface Event {
@@ -97,7 +113,15 @@ class TunnelClient(
     }
 
     private val events = Channel<Event>(Channel.UNLIMITED)
-    private val lastServerPing = AtomicLong(0)
+    private val requestsInFlight = MutableStateFlow(0)
+
+    // Watchdog state, guarded by [watchdogLock]: the heartbeat loop and alarm-driven checkHealth
+    // calls run on different threads.
+    private val watchdogLock = Any()
+    private var lastServerPing = 0L
+    private var lastCheckUptime = 0L
+    private var graceUntil = Long.MIN_VALUE
+    private var graceUsed = false
 
     @Volatile
     private var socket: WebSocket? = null
@@ -110,7 +134,10 @@ class TunnelClient(
         socket = ws
         try {
             awaitOpen(ws)
-            lastServerPing.set(clock.elapsedMs())
+            synchronized(watchdogLock) {
+                lastServerPing = clock.elapsedMs()
+                lastCheckUptime = uptimeClock.elapsedMs()
+            }
             val tunnelUrl = awaitHandshake()
             established = true
             log.info("Tunnel established: $tunnelUrl")
@@ -141,14 +168,48 @@ class TunnelClient(
 
     override fun checkHealth(): Boolean = !isUnhealthy()
 
-    /** Queues an abort and returns true if no server ping arrived within [healthTimeoutMs]. */
+    override suspend fun awaitRequestsIdle() {
+        requestsInFlight.first { it == 0 }
+    }
+
+    override fun hasRequestsInFlight(): Boolean = requestsInFlight.value > 0
+
+    /**
+     * Queues an abort and returns true if no server ping arrived within [healthTimeoutMs], unless
+     * this check found the process had been frozen (see the class doc).
+     */
     private fun isUnhealthy(): Boolean {
         if (!established) return false
-        val elapsed = clock.elapsedMs() - lastServerPing.get()
-        if (elapsed <= healthTimeoutMs) return false
-        log.warn("No server ping in ${elapsed / 1000}s, closing connection")
-        events.trySend(Event.Aborted("No server ping in ${elapsed / 1000}s"))
+        val reason = synchronized(watchdogLock) {
+            val now = clock.elapsedMs()
+            val uptime = uptimeClock.elapsedMs()
+            val pausedMs = uptime - lastCheckUptime
+            lastCheckUptime = uptime
+            val silentMs = now - lastServerPing
+            when {
+                silentMs <= healthTimeoutMs || now <= graceUntil -> null
+                pausedMs > heartbeatIntervalMs + FROZEN_SLACK_MS && !graceUsed -> {
+                    graceUsed = true
+                    graceUntil = now + heartbeatIntervalMs
+                    log.info(
+                        "App was frozen for ${pausedMs / 1000}s, waiting ${heartbeatIntervalMs / 1000}s for a server ping",
+                    )
+                    null
+                }
+                else -> "No server ping in ${silentMs / 1000}s"
+            }
+        } ?: return false
+        log.warn("$reason, closing connection")
+        events.trySend(Event.Aborted(reason))
         return true
+    }
+
+    private fun onServerPing() {
+        synchronized(watchdogLock) {
+            lastServerPing = clock.elapsedMs()
+            graceUsed = false
+            graceUntil = Long.MIN_VALUE
+        }
     }
 
     private fun buildRequest(): Request {
@@ -233,12 +294,16 @@ class TunnelClient(
                             onRequest()
                             // Taken before the coroutine is dispatched so the CPU cannot suspend in between.
                             val wakeLock = wakeLocks.acquire("request", requestTimeoutMs + WAKE_LOCK_SLACK_MS)
+                            requestsInFlight.update { it + 1 }
                             // Released on completion, which also covers a request cancelled before it ran.
                             requestScope.launch { handleRequest(ws, message) }
-                                .invokeOnCompletion { wakeLock.close() }
+                                .invokeOnCompletion {
+                                    wakeLock.close()
+                                    requestsInFlight.update { it - 1 }
+                                }
                         }
                         is ServerMessage.Ping -> {
-                            lastServerPing.set(clock.elapsedMs())
+                            onServerPing()
                             ws.send(Protocol.encode(ClientMessage.Pong(message.timestamp)))
                         }
                         is ServerMessage.Error -> {
@@ -343,6 +408,9 @@ class TunnelClient(
 
         /** Extra wake-lock time on top of the request budget for sending the response. */
         private const val WAKE_LOCK_SLACK_MS = 5_000L
+
+        /** How late a watchdog check may run on uptime before it counts as a freeze. */
+        const val FROZEN_SLACK_MS = 10_000L
 
         internal fun errorEnvelope(id: kotlinx.serialization.json.JsonElement, code: Int, message: String): JsonObject =
             buildJsonObject {

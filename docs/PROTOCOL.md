@@ -212,7 +212,8 @@ High-priority FCM **data** message (no `notification` payload):
 {"type":"wake","reason":"mcp_request"}
 ```
 
-- Tunnel connected: ignored. Tunnel running but between reconnect attempts: retry now.
+- Tunnel looks connected: the socket is dropped and reconnected, unless it shows recent activity
+  (Deviations 16). Tunnel running but between reconnect attempts: retry now.
 - Otherwise: start the foreground service (its notification is shown if the user allowed
   notifications) and connect, in either connection mode. In on-demand mode the session then
   ends after the idle window (15 / 30 / 60 min) without a `request` frame.
@@ -309,3 +310,17 @@ collection adds `"message": "No decks found in AnkiDroid"`.
     closes the socket with 1000 after 15 / 30 / 60 minutes without a `request` frame and does
     not reconnect until the next wake-up or Connect. The add-on has no such timer. The relay's
     own 4010 IDLE_TIMEOUT is unrelated and handled as in the table above.
+14. **Screen-off and freeze close**: under the same condition the app also closes with 1000
+    when the screen turns off or when it detects that the OS froze its process, and does not
+    reconnect until the next wake-up or Connect (docs/DECISIONS.md D40, D41). Frames are
+    unchanged.
+15. **Ping watchdog after a freeze**: if the 60 s ping watchdog finds pings overdue on the first
+    check that runs more than 40 s (one ping interval plus 10 s, on a clock that stops in CPU
+    suspend) after the previous check, i.e. after the process was frozen, it waits one more
+    ping interval (30 s) before dropping the socket, once per received ping (D43). The add-on
+    has no such case.
+16. **Push wake-up while connected**: a wake-up that finds the tunnel looking connected drops
+    the socket locally (`ws.cancel()`, nothing is sent on the wire; 1001 is only the local close
+    result) and reconnects at once, since the relay only sends one when it has no connection
+    for the account (D40). A connection that connected or got a `request` frame in the last
+    10 s, or has a request in flight, is kept: the wake-up crossed it.

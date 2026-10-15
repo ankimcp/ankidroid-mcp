@@ -1,7 +1,8 @@
 # Decisions
 
-Decisions made while building phase 1, and the push wake-up feature after it (D31-D39),
-without a chance to ask. Each one is cheap to revisit.
+Decisions made while building phase 1, the push wake-up feature after it (D31-D39), and the
+fixes after the first on-device trial (D40-D44), without a chance to ask. Each one is cheap to
+revisit.
 
 ## Target SDK
 
@@ -94,8 +95,7 @@ without a chance to ask. Each one is cheap to revisit.
 - **D14. Onboarding gates the app** on "AnkiDroid installed" and "permission granted". You
   can't request the permission without AnkiDroid installed (the permission is defined by
   AnkiDroid), so sign-in is only offered afterwards. Battery optimisation is optional and only
-  deep-links to `ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS`; the app does not declare
-  `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` (Play restricts it).
+  deep-links to settings; the app does not declare `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` (D42).
 
 ## Auth and storage
 
@@ -190,7 +190,8 @@ without a chance to ask. Each one is cheap to revisit.
   - Backoffs longer than 5 s release the CPU and schedule an alarm (D29); when it fires,
     `TunnelAlarmReceiver` takes a 10 s bridging wake lock and cuts the backoff short.
   - While connected, the same alarm fires every 60 s and re-runs the health check, so a socket
-    that died silently (no more pings, so nothing wakes the CPU) is still detected in Doze.
+    that died silently (no more pings, so nothing wakes the CPU) is still detected in Doze. A
+    check after a process freeze (not a CPU suspend) gets a grace period first (D43).
     The alarm is shared with the backoff, so it is re-armed only if, after the check, the
     session that was checked is still the active one and connected (checked under the same
     lock as the generation guard). If the session died in between, the loop's backoff alarm
@@ -253,7 +254,7 @@ without a chance to ask. Each one is cheap to revisit.
     (app start) or delivered (`onNewToken`), so a fresh process is "not ready" until its first
     sync. Otherwise on demand is a manual session that stays up until Disconnect, and the Status
     screen says so. Disconnecting idle sessions without a way back would silently make Claude
-    lose access.
+    lose access. The same condition gates the screen-off and freeze stops (D40).
   - The timer reads `wakeUpsReady` only when it is armed, so `AppGraph` calls
     `tunnel.onIdleSettingsChanged()` whenever `wakeUpsReady` changes: a registration that
     succeeds mid-session arms it (counting from then), one that breaks disarms it.
@@ -348,12 +349,17 @@ without a chance to ask. Each one is cheap to revisit.
   thread, no blocking work):
   - `type` other than `wake`: ignored.
   - Signing out (D35): ignored, logged.
-  - Tunnel connected: no-op. Tunnel running but between attempts: the backoff is cut short.
+  - Tunnel looks connected: the relay only wakes a phone it has no connection for, so the
+    socket is dead; it is dropped and the run reconnects at once (D40). Tunnel running but
+    between attempts: the backoff is cut short.
   - Not signed in: logged, no connection and no notification. The user signed out on purpose
     (or never signed in), so "your session has expired" would be wrong.
-  - Otherwise: start the foreground service through `startForegroundServiceSafely` (a
-    high-priority FCM message is an allowed background-start exemption on Android 12+), then
-    start the tunnel directly so this wake owns the run. The service is started with an extra
+  - Otherwise: start the tunnel directly so this wake owns the run, then the foreground service
+    through `startForegroundServiceSafely` (a high-priority FCM message is an allowed
+    background-start exemption on Android 12+); if Android refuses the service, the run is
+    stopped again with "Could not start in the background". Tunnel first: the service shuts
+    down when `onStartCommand` finds the tunnel stopped (D40), and in the other order it could
+    run between the two calls and see the previous run's Stopped state. The service is started with an extra
     that tells it not to start the tunnel itself: otherwise a run that had already ended (e.g.
     no credentials) would be started a second time when `onStartCommand` arrives. The tunnel
     refreshes an expired token before connecting; if that ends in a session that needs a new
@@ -369,7 +375,8 @@ without a chance to ask. Each one is cheap to revisit.
     shown and the tunnel log says so (D21).
 - **D37. FGS special-use description** in the manifest now says the service is also started by
   a push message from the AnkiMCP server and stops after the idle period, since Play reviews
-  that text against actual behaviour.
+  that text against actual behaviour. It also says that in on-demand mode it stops when the
+  screen turns off (D40).
 - **D38. Registration tokens, not Firebase Installation IDs.** firebase-messaging 25.1.0
   (firebase-android-sdk PR #8087, "FCM V1 API Migration") deprecated `getToken`, `deleteToken`
   and `onNewToken` in favour of an opt-in FID registration: `FirebaseMessaging.register()` /
@@ -395,6 +402,141 @@ without a chance to ask. Each one is cheap to revisit.
     the account's wake-ups, and deleted on sign-out, or at the next opportunity if the device
     is offline (DELETE plus `deleteToken`, D35). The data-safety form should declare it as a
     device ID collected for app functionality, not shared.
+
+## OEM background freezers (first on-device trial)
+
+Found on a Realme RMX3741 (Android 15, ColorOS): ColorOS's "Hans" freezer freezes the process
+(cgroup `frozen 1`) about a minute after the screen goes off, although the `specialUse` FGS is
+running and Doze is not active. Frames queue in the kernel, the relay misses the pong and drops
+the socket at its next 30 s tick, and requests in that window reach the app late or never.
+Stock Android does not freeze foreground services; Oppo/Realme/OnePlus (ColorOS/OxygenOS),
+Xiaomi (MIUI/HyperOS), Vivo (Funtouch/OriginOS) and Huawei/Honor (EMUI/MagicOS) do. AnkiDroid
+gets frozen too.
+
+- **D40. On demand ends the session when the phone goes to sleep.** While the idle timer runs
+  (on demand with working wake-ups, D32), two more events end the session through the idle
+  timer's path (`stopRun`: socket closed with 1000, alarms and wake locks released, generation
+  bumped, the service stops on the `Stopped` state), published as
+  `Stopped(1000, reason, phoneAsleep = true)`. On a screen-off stop the relay then drops its KV
+  entry at once and routes the next request to a push wake-up instead of a socket that is about
+  to be frozen.
+  - Screen off: `ACTION_SCREEN_OFF` (and `ACTION_SCREEN_ON`), from a receiver the service
+    registers in `onStartCommand` and unregisters in `onDestroy` (`service/ScreenMonitor`). Chosen over
+    `DisplayManager.DisplayListener`: it needs no `Handler`, reports exactly the interactive
+    state change we care about (not every display or brightness change, and not secondary
+    displays), and is delivered to context-registered receivers in a process with a running
+    FGS (Android 14 only defers it for cached processes). It is a protected broadcast, so it is
+    registered with `RECEIVER_EXPORTED` as the broadcasts guide asks for system broadcasts; no
+    other app can send it. Requests in flight finish first: the stop waits until the session
+    handles no relay request (`TunnelSession.awaitRequestsIdle`), at most the 25 s request
+    budget, under a `screen-off` wake lock. Screen on during that wait calls the stop off;
+    otherwise screen on does nothing (D41).
+  - Freeze: `TunnelConnection` ticks every 30 s of coroutine time for as long as a run lasts
+    and compares each tick with `SystemClock.uptimeMillis()`. Both stop while the CPU sleeps,
+    so ordinary Doze/suspend never looks like a freeze; a tick more than 60 s late on uptime
+    means the process was not scheduled while the CPU ran, i.e. frozen. (`elapsedRealtime`
+    would count every CPU suspend as a gap.) By then the relay has already terminated the
+    socket for the missed pong and removed its KV entry, so the 1000 close goes nowhere; the
+    stop's value here is the local cleanup (service, notification, alarms, wake locks) instead of
+    a reconnect loop on a phone that will freeze again. Only on demand with wake-ups ends the
+    session; Always connected keeps its reconnect loop.
+  - Battery note (D42): a freeze is reported to `FreezeNotice` in Always connected (or on
+    demand without wake-ups), and in on demand when the screen was on at the previous tick and
+    at the detecting one (`PowerManager.isInteractive`). The expected on-demand case, a session
+    a wake-up started with the screen off that then freezes, ends quietly: that is the design
+    working, not something for the user to fix.
+  - A push wake-up while the run still looks connected (D36) means the relay has no connection
+    for us, typically a socket that died while frozen, with the wake-up's thaw arriving before
+    the freeze tick. `onPushWake` drops the session and reconnects at once, and restarts the
+    freeze watch so its overdue tick cannot end the run the wake-up is reviving. Before this, the
+    wake-up was a no-op, the freeze tick then ended the run, and the relay's 15 s per-user wake
+    throttle made Claude's retry fail. A session with signs of life is kept: it connected or
+    received a `request` frame less than 10 s ago, or a request is in flight (the wake-up
+    crossed a fresh connection; FCM delivery alone can take several seconds, and Claude's retry
+    may already be using the new connection). A socket the relay terminated while the app was
+    frozen ends with EOF once the backlog is read, so a request frame from that backlog cannot
+    keep it alive for long.
+  - The freeze tick and the wake-up race at thaw, so both sleep stops pass a check to `stopRun`
+    that runs under the tunnel lock with the generation check: the freeze stop only goes ahead
+    if its watch is still the current one (a wake-up restarts it), the screen-off stop only if
+    it is still the pending screen-off job (a screen-on clears it). If the freeze stop wins
+    instead, `onPushWake` finds no run and returns false, and the wake handler starts a new run
+    as if nothing had been running.
+  - The service's state collector stops the service only if the tunnel is still stopped when
+    the main thread gets there (a wake-up may have started a new run meanwhile), and stops with
+    `stopSelfResult(lastStartId)`, which Android refuses while a newer start (a wake-up's
+    `startForegroundService`) is queued. Otherwise the service could tear down, with its screen
+    and network monitors, under a running tunnel. If that queued start then begins no run (its
+    run had already ended), no new Stopped arrives, so `onStartCommand` also shuts down when it
+    ends with the tunnel stopped.
+  - Without working wake-ups (D32) neither event ends the session, since nothing could bring it
+    back; a frozen socket then recovers through the normal reconnect loop.
+  - A session started by a wake-up while the screen is already off gets no screen-off event; if
+    the phone freezes it, the freeze rule ends it.
+- **D41. No reconnect when the screen turns on.** The brief allowed reconnecting on screen on if
+  the session had ended only because of the screen and the idle window had not expired. Not
+  done: after the screen-off stop the service is gone, and starting a foreground service from a
+  `SCREEN_ON` broadcast in the background is refused on Android 12+ (not an allowed exemption),
+  so it would fail exactly when it matters. It would also reconnect on every glance at the
+  lock screen. Claude's next request arrives as a push wake-up, which is an allowed exemption
+  and already starts the service and the tunnel (D36). Opening the app does not reconnect
+  either (on demand never auto-connects, D20). The Status screen says so: "Disconnects when the
+  screen turns off or after N min without requests, and does not reconnect when you turn the
+  screen on: Claude's next request wakes it again."
+- **D42. Battery card: settings links, no direct exemption request.** The card stays optional
+  and blocks nothing.
+  - No `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` permission and no
+    `ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` dialog. Google's Doze acceptable-use table
+    (developer.android.com, "Optimize for Doze and App Standby") marks the exemption "Not
+    acceptable" for apps that can use FCM high-priority messages, and this app does (push
+    wake-ups, D31-D36); Play policy forbids the direct request unless Doze/App Standby break the
+    core function. It would also not fix the problem found on the trial phone: the exemption
+    only covers Doze and App Standby, not OEM freezers such as ColorOS's Hans, where the maker's
+    own "Allow background activity" switch is what matters. (A first version of D42 used the
+    dialog; it was dropped before release.)
+  - "Open battery settings" opens `ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS` (the system
+    list; App info if that does not resolve). `PowerManager.isIgnoringBatteryOptimizations`
+    drives the tick.
+  - `service/FreezingOem` matches `Build.MANUFACTURER`/`Build.BRAND` (lower-cased, exact string)
+    against oppo, realme, oneplus, xiaomi, redmi, poco, vivo, iqoo, huawei, honor. On those
+    makers the card sits right below the tunnel card until the exemption is granted, names the
+    maker's own switches (ColorOS: "Allow background activity" and "Don't optimise"), and its
+    button is labelled "Open app info" and opens the app's own App info page
+    (`ACTION_APPLICATION_DETAILS_SETTINGS`), where those makers put the per-app battery page;
+    each maker's text says where to go from there (ColorOS: "In App info > Battery usage, ...").
+    No maker publishes an intent for that sub-page, and
+    hard-coded component names of OEM settings activities change between skin versions, so the
+    app does not guess them. The card stays lower down after the exemption is granted, since
+    the maker's switches cannot be read.
+  - A reported freeze (D40 says which ones) sets a persisted flag (`settings/FreezeNotice`,
+    keys `freeze_detected` and `freeze_detected_at` in the `settings` file). The card then
+    moves to the top with "Your phone froze the connection in the background" and a Dismiss
+    button. The flag is cleared by Dismiss, when battery optimisation goes from on to off while
+    the app is open (the user acted on it), or when the app is exempt and the last freeze is 7
+    days old (an exemption granted while the app was not running would otherwise never clear
+    it). A freeze seen while already exempt sets it again and restarts the 7 days, pointing at
+    the maker's switches.
+- **D43. The ping watchdog does not count frozen time.** `TunnelClient` also reads uptime. A
+  health check (heartbeat tick or alarm-driven `checkHealth`) that comes more than one
+  heartbeat interval plus 10 s (40 s) after the previous one on uptime means the process was
+  frozen while the CPU ran, so pings may still be queued behind the check. Ticks run every 30 s
+  on a clock that also stops in CPU suspend, so on-time checks are at most ~30 s apart; the
+  first version used 60 s, which missed about half of the trial's cases (pauses of 46-76 s,
+  depending on when the last check ran). If pings are then overdue,
+  the check grants one heartbeat interval (30 s) of grace instead of dropping the socket, and
+  logs "App was frozen for Ns, waiting 30s for a server ping". The grace is granted once per
+  server ping: a second paused check without a ping in between is judged normally, so a socket
+  that really died while the app was frozen is still dropped (one check later). A late check
+  caused by CPU suspend (uptime did not move) is judged at once as before (D27), so silent
+  sockets are still found in Doze. On the trial phone this had aborted a live connection with
+  "No server ping in 76s" while draining the backlog that held the ping.
+- **D44. A null cursor from AnkiDroid is retried.** A frozen AnkiDroid answered the deck query
+  with a null cursor in 13 ms. Acquiring the provider normally thaws its process (an
+  assumption from how the framework treats provider clients; not yet verified on a device), so a null
+  cursor is retried after 0.5 s and 1.5 s (three attempts, about 2 s), each attempt a separate
+  submission to the provider pool so no thread sleeps, all inside the existing 20 s budget
+  (D13). Still null after that: "AnkiDroid did not answer the deck query, probably because the
+  phone put it to sleep. Try again; if it keeps happening, open AnkiDroid once and try again."
 
 ## MCP
 
@@ -431,6 +573,9 @@ without a chance to ask. Each one is cheap to revisit.
 - No build with a real `google-services.json` was made (the file was not available), so the
   google-services plugin path is untested.
 - FID-based FCM registration (D38) is not adopted yet.
+- D40-D44 are unit-tested only; not yet re-run on the Realme trial phone, and push wake-ups
+  are not yet enabled server side, so the on-demand "next request wakes it" path is untested
+  end to end.
 - Placeholder launcher icon; no Play listing assets, privacy policy or data-safety form (the
   data-safety form will need to declare the FCM token, see D39).
 - The relay's `ClientTypeSchema` does not know `ankidroid` yet (harmless, see PROTOCOL.md).

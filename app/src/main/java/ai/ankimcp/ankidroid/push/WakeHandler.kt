@@ -1,6 +1,7 @@
 package ai.ankimcp.ankidroid.push
 
 import ai.ankimcp.ankidroid.log.TunnelLog
+import ai.ankimcp.ankidroid.service.SERVICE_START_BLOCKED_REASON
 import ai.ankimcp.ankidroid.tunnel.TunnelState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.StateFlow
@@ -31,19 +32,26 @@ class WakeHandler(
     private val isSigningOut: () -> Boolean,
     /**
      * `startForegroundService` without starting the tunnel (this handler does that); false if
-     * Android refused it (already logged and shown).
+     * Android refused it (already logged).
      */
     private val startService: () -> Boolean,
     private val startTunnel: () -> Unit,
-    /** Stops the run this wake started when a logout began meanwhile. */
-    private val stopTunnel: () -> Unit,
-    /** Cuts a running tunnel's reconnect backoff short. */
-    private val nudgeTunnel: () -> Unit,
+    /**
+     * Stops the run this wake started, with the reason shown: the service start was refused, or
+     * a logout began meanwhile.
+     */
+    private val stopTunnel: (reason: String) -> Unit,
+    /**
+     * Revives a running tunnel: reconnects at once if it looks connected (the relay found no
+     * connection, so the socket is dead), otherwise cuts its reconnect backoff short. False if
+     * the run had already ended, in which case a new one is started.
+     */
+    private val wakeRunningTunnel: () -> Boolean,
     private val notifier: SignInNotifier,
     private val log: TunnelLog,
     private val watchTimeoutMs: Long = WATCH_TIMEOUT_MS,
 ) {
-    enum class Outcome { Ignored, AlreadyConnected, Nudged, Started, NotSignedIn, SigningOut, StartBlocked }
+    enum class Outcome { Ignored, Reconnected, Nudged, Started, NotSignedIn, SigningOut, StartBlocked }
 
     fun onMessage(data: Map<String, String>): Outcome {
         if (data[KEY_TYPE] != TYPE_WAKE) {
@@ -56,13 +64,19 @@ class WakeHandler(
             return Outcome.SigningOut
         }
         if (isTunnelRunning()) {
-            if (tunnelState.value is TunnelState.Connected) {
-                log.debug("Wake-up ($reason): already connected")
-                return Outcome.AlreadyConnected
+            // The relay only wakes a phone it has no connection for, so "connected" here is stale
+            // (typically a socket that died while the app was frozen).
+            val looksConnected = tunnelState.value is TunnelState.Connected
+            if (wakeRunningTunnel()) {
+                if (looksConnected) {
+                    log.info("Wake-up ($reason): tunnel looked connected but the relay has no connection, reconnecting")
+                    return Outcome.Reconnected
+                }
+                log.info("Wake-up ($reason): tunnel is reconnecting, retrying now")
+                return Outcome.Nudged
             }
-            log.info("Wake-up ($reason): tunnel is reconnecting, retrying now")
-            nudgeTunnel()
-            return Outcome.Nudged
+            // The run ended in between (e.g. a freeze stop): start a new one below.
+            log.info("Wake-up ($reason): tunnel stopped meanwhile")
         }
         if (!isSignedIn()) {
             // Signed out on purpose (or never signed in): nothing expired, so no notification.
@@ -70,14 +84,19 @@ class WakeHandler(
             return Outcome.NotSignedIn
         }
         log.info("Wake-up ($reason): connecting")
-        if (!startService()) return Outcome.StartBlocked
-        // Started here rather than in the service so the run below is this wake's run.
+        // Started here rather than in the service so the run below is this wake's run, and
+        // before the service so its onStartCommand sees this run rather than the previous run's
+        // Stopped state (which would make it shut down again).
         startTunnel()
+        if (!startService()) {
+            stopTunnel(SERVICE_START_BLOCKED_REASON)
+            return Outcome.StartBlocked
+        }
         // A logout that began after the check above has already stopped the tunnel, before this
         // run existed; the credentials it is about to clear would otherwise keep this run going.
         if (isSigningOut()) {
             log.info("Wake-up ($reason): signing out, disconnecting")
-            stopTunnel()
+            stopTunnel("Signing out")
             return Outcome.SigningOut
         }
         scope.launch {

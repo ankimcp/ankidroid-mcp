@@ -31,11 +31,13 @@ import kotlinx.coroutines.launch
 class TunnelForegroundService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var stateJob: Job? = null
+    private var lastStartId = 0
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val graph = appGraph
+        lastStartId = startId
         if (intent?.action == ACTION_STOP) {
             // An explicit Disconnect also leaves "Always connected", same as in the app.
             graph.settings.onUserDisconnect()
@@ -50,6 +52,7 @@ class TunnelForegroundService : Service() {
         startInForeground(buildNotification(graph.tunnel.state.value))
 
         graph.networkMonitor.start { changed -> graph.tunnel.onNetworkAvailable(changed) }
+        graph.screenMonitor.start(onScreenOff = graph.tunnel::onScreenOff, onScreenOn = graph.tunnel::onScreenOn)
         startTunnelForServiceStart(
             readExtra = { key, default -> intent?.getBooleanExtra(key, default) ?: default },
             startTunnel = graph.tunnel::start,
@@ -59,7 +62,7 @@ class TunnelForegroundService : Service() {
             stateJob = scope.launch {
                 graph.tunnel.state.collect { state ->
                     if (state is TunnelState.Stopped) {
-                        shutdown()
+                        if (serviceShouldStop(state, graph.tunnel.state.value)) shutdown()
                     } else {
                         getSystemService(NotificationManager::class.java)
                             .notify(NOTIFICATION_ID, buildNotification(state))
@@ -67,6 +70,9 @@ class TunnelForegroundService : Service() {
                 }
             }
         }
+        // An earlier shutdown may have been refused for this start, and if this start began no
+        // run (e.g. a wake-up whose run already ended), Stopped is not emitted again.
+        if (graph.tunnel.state.value is TunnelState.Stopped) shutdown()
         // Not sticky: after a process kill we only come back via the app, BootReceiver or a
         // push wake-up, all of which respect the user's connection mode.
         return START_NOT_STICKY
@@ -74,13 +80,14 @@ class TunnelForegroundService : Service() {
 
     override fun onDestroy() {
         appGraph.networkMonitor.stop()
+        appGraph.screenMonitor.stop()
         scope.cancel()
         super.onDestroy()
     }
 
+    /** Refused (and the notification kept) when a newer start, e.g. a wake-up's, is already queued. */
     private fun shutdown() {
-        stopForeground(STOP_FOREGROUND_REMOVE)
-        stopSelf()
+        if (stopSelfResult(lastStartId)) stopForeground(STOP_FOREGROUND_REMOVE)
     }
 
     private fun startInForeground(notification: Notification) {

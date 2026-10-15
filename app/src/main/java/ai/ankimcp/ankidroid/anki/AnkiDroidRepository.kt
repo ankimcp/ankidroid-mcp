@@ -1,6 +1,7 @@
 package ai.ankimcp.ankidroid.anki
 
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -68,19 +69,28 @@ sealed interface AnkiResult<out T> {
  * counted from submission. A binder call that never returns keeps its thread, but only that one.
  * A full queue fails fast with [AnkiResult.Busy]; only a timeout reports
  * [AnkiResult.NotResponding].
+ *
+ * A null cursor usually means the OS had frozen AnkiDroid's process; acquiring the provider
+ * thaws it, so the query is retried after each of [nullRetryDelaysMs] before giving up. The
+ * retries share the [timeoutMs] budget.
  */
 class AnkiDroidRepository(
     private val provider: AnkiProvider,
     private val availability: AnkiDroidAvailability,
     private val providerExecutor: Executor,
     private val timeoutMs: Long = DEFAULT_TIMEOUT_MS,
+    private val nullRetryDelaysMs: List<Long> = NULL_RETRY_DELAYS_MS,
 ) {
-    suspend fun listDecks(): AnkiResult<List<Deck>> = call {
-        val rows = provider.queryDecks()
-            ?: return@call AnkiResult.Unavailable(
-                "AnkiDroid did not answer the deck query. Open AnkiDroid once and try again.",
-            )
-        AnkiResult.Success(
+    suspend fun listDecks(): AnkiResult<List<Deck>> {
+        val rows = when (val result = queryRetryingNull { provider.queryDecks() }) {
+            is AnkiResult.Success -> result.value
+                ?: return AnkiResult.Unavailable(
+                    "AnkiDroid did not answer the deck query, probably because the phone put it to sleep. " +
+                        "Try again; if it keeps happening, open AnkiDroid once and try again.",
+                )
+            is AnkiResult.Failure -> return result
+        }
+        return AnkiResult.Success(
             rows.filter { it.id != 0L && it.name.isNotEmpty() }
                 .map { row ->
                     Deck(
@@ -93,9 +103,22 @@ class AnkiDroidRepository(
         )
     }
 
-    private suspend fun <T> call(block: () -> AnkiResult<T>): AnkiResult<T> {
+    /** Runs [query] until it returns non-null or the retries run out; still null after that is a success with null. */
+    private suspend fun <T : Any> queryRetryingNull(query: () -> T?): AnkiResult<T?> {
         if (!availability.isInstalled()) return AnkiResult.NotInstalled
         if (!availability.hasPermission()) return AnkiResult.PermissionDenied
+        return withTimeoutOrNull(timeoutMs) {
+            var result = submit { AnkiResult.Success(query()) }
+            for (delayMs in nullRetryDelaysMs) {
+                if (result !is AnkiResult.Success || result.value != null) break
+                delay(delayMs)
+                result = submit { AnkiResult.Success(query()) }
+            }
+            result
+        } ?: AnkiResult.NotResponding(timeoutMs)
+    }
+
+    private suspend fun <T> submit(block: () -> AnkiResult<T>): AnkiResult<T> {
         val result = CompletableDeferred<AnkiResult<T>>()
         try {
             providerExecutor.execute {
@@ -105,8 +128,11 @@ class AnkiDroidRepository(
         } catch (_: RejectedExecutionException) {
             return AnkiResult.Busy
         }
-        return withTimeoutOrNull(timeoutMs) { result.await() }
-            ?: AnkiResult.NotResponding(timeoutMs).also { result.cancel() }
+        try {
+            return result.await()
+        } finally {
+            result.cancel()
+        }
     }
 
     private fun <T> runProviderCall(block: () -> AnkiResult<T>): AnkiResult<T> = try {
@@ -129,6 +155,9 @@ class AnkiDroidRepository(
          * rather than a generic 504.
          */
         const val DEFAULT_TIMEOUT_MS = 20_000L
+
+        /** Three attempts over about 2 s. */
+        val NULL_RETRY_DELAYS_MS = listOf(500L, 1_500L)
 
         /** Upper bound on threads that a hung AnkiDroid can pin. */
         const val MAX_PROVIDER_THREADS = 4

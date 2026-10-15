@@ -57,6 +57,9 @@ class TunnelConnectionTest {
         data class EstablishThenClose(val code: Int, val reason: String = "", val beforeEstablish: () -> Unit = {}) : Step
         data object EstablishThenHang : Step
 
+        /** Never gets `tunnel_established`: stays Connecting until disconnected. */
+        data object HangConnecting : Step
+
         /**
          * A session whose run() does not observe cancellation (plain suspendCoroutine) and reports
          * 1001 once disconnected, so the loop keeps going after stop() cancelled it.
@@ -76,8 +79,17 @@ class TunnelConnectionTest {
         var abortedWith: String? = null
         var healthChecks = 0
 
+        /** False while the session is handling a relay request. */
+        val requestsIdle = MutableStateFlow(true)
+
         /** Simulates a `request` frame arriving from the relay. */
         fun request() = onRequest()
+
+        override suspend fun awaitRequestsIdle() {
+            requestsIdle.first { it }
+        }
+
+        override fun hasRequestsInFlight(): Boolean = !requestsIdle.value
 
         override suspend fun run(): CloseResult = when (step) {
             is Step.Fail -> throw TunnelConnectionException("scripted failure", step.closeCode)
@@ -90,6 +102,7 @@ class TunnelConnectionTest {
                 onEstablished("https://tunnel.example/mcp")
                 hang.await()
             }
+            Step.HangConnecting -> hang.await()
             Step.EstablishThenHangIgnoringCancel -> {
                 onEstablished("https://tunnel.example/mcp")
                 suspendCoroutine { uncancellable = it }
@@ -193,6 +206,9 @@ class TunnelConnectionTest {
         idleTimeoutMs: () -> Long? = { null },
         idleWakeups: WakeupScheduler = WakeupScheduler.None,
         elapsedClock: ElapsedClock = ElapsedClock { testScheduler.currentTime },
+        uptimeClock: ElapsedClock = ElapsedClock { testScheduler.currentTime },
+        onFrozen: (Long) -> Unit = {},
+        isScreenOn: () -> Boolean = { true },
         log: TunnelLog = TunnelLog(mirrorToLogcat = false),
     ): TunnelConnection {
         val authClient = DeviceFlowClient(
@@ -213,6 +229,9 @@ class TunnelConnectionTest {
             idleTimeoutMs = idleTimeoutMs,
             idleWakeups = idleWakeups,
             elapsedClock = elapsedClock,
+            uptimeClock = uptimeClock,
+            onFrozen = onFrozen,
+            isScreenOn = isScreenOn,
         )
     }
 
@@ -873,6 +892,436 @@ class TunnelConnectionTest {
         runCurrent()
 
         assertTrue((tunnel.state.value as TunnelState.Stopped).idleTimeout)
+    }
+
+    @Test
+    fun `screen off ends an on-demand session like the idle timer and nothing reconnects`() = runTest {
+        val idleWakeups = RecordingWakeups()
+        val wakeups = RecordingWakeups()
+        val factory = ScriptedFactory(listOf(Step.EstablishThenHang))
+        val tunnel = connection(
+            InMemoryStore(credentials),
+            factory,
+            wakeups = wakeups,
+            idleTimeoutMs = { IDLE_MS },
+            idleWakeups = idleWakeups,
+        )
+        tunnel.start()
+        runCurrent()
+        advanceTimeBy(5 * MINUTE)
+
+        tunnel.onScreenOff()
+        runCurrent()
+
+        val stopped = tunnel.state.value as TunnelState.Stopped
+        assertEquals(CloseCodes.NORMAL, stopped.code)
+        assertEquals("Screen turned off", stopped.reason)
+        assertTrue(stopped.phoneAsleep)
+        assertFalse(stopped.idleTimeout)
+        assertFalse(tunnel.isRunning)
+        assertTrue(factory.sessions.single().disconnected)
+        assertNull(tunnel.idleDeadlineMs.value)
+        assertNull(idleWakeups.pending)
+        assertNull(wakeups.pending)
+
+        advanceTimeBy(IDLE_MS)
+        runCurrent()
+        assertEquals(stopped, tunnel.state.value)
+        assertEquals(1, factory.sessions.size)
+    }
+
+    @Test
+    fun `screen off leaves the tunnel up when no idle timer runs`() = runTest {
+        val tunnel = connection(
+            InMemoryStore(credentials),
+            ScriptedFactory(listOf(Step.EstablishThenHang)),
+            idleTimeoutMs = { null },
+        )
+        tunnel.start()
+        runCurrent()
+
+        tunnel.onScreenOff()
+        runCurrent()
+
+        assertTrue(tunnel.state.value is TunnelState.Connected)
+        tunnel.stop()
+    }
+
+    @Test
+    fun `screen off lets a request in flight finish first`() = runTest {
+        val wakeLocks = RecordingWakeLocks()
+        val factory = ScriptedFactory(listOf(Step.EstablishThenHang))
+        val tunnel = connection(InMemoryStore(credentials), factory, wakeLocks = wakeLocks, idleTimeoutMs = { IDLE_MS })
+        tunnel.start()
+        runCurrent()
+        val session = factory.sessions.single()
+        session.requestsIdle.value = false
+
+        tunnel.onScreenOff()
+        advanceTimeBy(10_000)
+        runCurrent()
+        assertTrue(tunnel.state.value is TunnelState.Connected)
+        assertTrue("the CPU stays up while it waits", "screen-off" in wakeLocks.acquired)
+
+        session.requestsIdle.value = true
+        runCurrent()
+        assertTrue((tunnel.state.value as TunnelState.Stopped).phoneAsleep)
+        assertTrue("screen-off" in wakeLocks.released)
+    }
+
+    @Test
+    fun `screen off waits for requests at most the request budget`() = runTest {
+        val factory = ScriptedFactory(listOf(Step.EstablishThenHang))
+        val tunnel = connection(InMemoryStore(credentials), factory, idleTimeoutMs = { IDLE_MS })
+        tunnel.start()
+        runCurrent()
+        factory.sessions.single().requestsIdle.value = false
+
+        tunnel.onScreenOff()
+        advanceTimeBy(ProtocolConstants.REQUEST_TIMEOUT_MS - 1)
+        runCurrent()
+        assertTrue(tunnel.state.value is TunnelState.Connected)
+
+        advanceTimeBy(1)
+        runCurrent()
+        assertTrue((tunnel.state.value as TunnelState.Stopped).phoneAsleep)
+    }
+
+    @Test
+    fun `screen on before the deferred stop keeps the session`() = runTest {
+        val factory = ScriptedFactory(listOf(Step.EstablishThenHang))
+        val tunnel = connection(InMemoryStore(credentials), factory, idleTimeoutMs = { IDLE_MS })
+        tunnel.start()
+        runCurrent()
+        val session = factory.sessions.single()
+        session.requestsIdle.value = false
+
+        tunnel.onScreenOff()
+        runCurrent()
+        tunnel.onScreenOn()
+        session.requestsIdle.value = true
+        advanceTimeBy(ProtocolConstants.REQUEST_TIMEOUT_MS)
+        runCurrent()
+
+        assertTrue(tunnel.state.value is TunnelState.Connected)
+        tunnel.stop()
+    }
+
+    @Test
+    fun `screen off while connecting ends the session at once`() = runTest {
+        val factory = ScriptedFactory(listOf(Step.HangConnecting))
+        val tunnel = connection(InMemoryStore(credentials), factory, idleTimeoutMs = { IDLE_MS })
+        tunnel.start()
+        runCurrent()
+        assertTrue(tunnel.state.value is TunnelState.Connecting)
+
+        tunnel.onScreenOff()
+        runCurrent()
+
+        val stopped = tunnel.state.value as TunnelState.Stopped
+        assertTrue(stopped.phoneAsleep)
+        assertTrue(factory.sessions.single().disconnected)
+        assertFalse(tunnel.isRunning)
+    }
+
+    @Test
+    fun `screen off after the tunnel stopped changes nothing`() = runTest {
+        val tunnel = connection(
+            InMemoryStore(credentials),
+            ScriptedFactory(listOf(Step.EstablishThenHang)),
+            idleTimeoutMs = { IDLE_MS },
+        )
+        tunnel.start()
+        runCurrent()
+        tunnel.stop()
+        val stopped = tunnel.state.value
+
+        tunnel.onScreenOff()
+        runCurrent()
+
+        assertEquals(stopped, tunnel.state.value)
+        assertFalse((stopped as TunnelState.Stopped).phoneAsleep)
+    }
+
+    @Test
+    fun `a wake-up that thaws a frozen session reconnects instead of letting the freeze stop it`() = runTest {
+        var frozen = 0L
+        val reports = mutableListOf<Long>()
+        val factory = ScriptedFactory(listOf(Step.EstablishThenHang, Step.EstablishThenHang))
+        val tunnel = connection(
+            InMemoryStore(credentials),
+            factory,
+            idleTimeoutMs = { IDLE_MS },
+            uptimeClock = { testScheduler.currentTime + frozen },
+            onFrozen = { reports += it },
+            isScreenOn = { false },
+        )
+        tunnel.start()
+        runCurrent()
+        advanceTimeBy(TunnelConnection.FREEZE_TICK_MS - 1)
+
+        // Frozen with the socket dead; the FCM wake-up thaws the process just before the overdue tick runs.
+        frozen = 76_000
+        tunnel.onPushWake()
+        assertEquals("Relay has no connection", factory.sessions[0].abortedWith)
+        runCurrent()
+        assertEquals(2, factory.sessions.size)
+        assertTrue(tunnel.state.value is TunnelState.Connected)
+
+        advanceTimeBy(2 * TunnelConnection.FREEZE_TICK_MS)
+        runCurrent()
+        assertTrue("the old watch's overdue tick must not end the revived run", tunnel.state.value is TunnelState.Connected)
+        assertTrue(reports.isEmpty())
+        tunnel.stop()
+    }
+
+    @Test
+    fun `a freeze stop already decided is dropped when a wake-up revives the run first`() = runTest {
+        var frozen = 0L
+        lateinit var tunnel: TunnelConnection
+        val factory = ScriptedFactory(listOf(Step.EstablishThenHang, Step.EstablishThenHang))
+        // onFrozen runs after the tick passed its own checks and before it stops the run: the
+        // wake-up lands exactly in that window.
+        tunnel = connection(
+            InMemoryStore(credentials),
+            factory,
+            idleTimeoutMs = { IDLE_MS },
+            uptimeClock = { testScheduler.currentTime + frozen },
+            onFrozen = { assertTrue(tunnel.onPushWake()) },
+            isScreenOn = { true },
+        )
+        tunnel.start()
+        runCurrent()
+
+        frozen = 76_000
+        advanceTimeBy(TunnelConnection.FREEZE_TICK_MS)
+        runCurrent()
+
+        assertEquals("Relay has no connection", factory.sessions[0].abortedWith)
+        assertEquals(2, factory.sessions.size)
+        assertTrue("the revived run must survive the stale freeze stop", tunnel.state.value is TunnelState.Connected)
+        tunnel.stop()
+    }
+
+    @Test
+    fun `a wake-up after the run stopped reports that nothing is running`() = runTest {
+        val tunnel = connection(
+            InMemoryStore(credentials),
+            ScriptedFactory(listOf(Step.EstablishThenHang)),
+            idleTimeoutMs = { IDLE_MS },
+        )
+        tunnel.start()
+        runCurrent()
+        tunnel.onScreenOff()
+        runCurrent()
+
+        assertFalse(tunnel.onPushWake())
+    }
+
+    @Test
+    fun `a wake-up that crosses a fresh connection keeps it`() = runTest {
+        val factory = ScriptedFactory(listOf(Step.EstablishThenHang))
+        val tunnel = connection(InMemoryStore(credentials), factory)
+        tunnel.start()
+        runCurrent()
+        advanceTimeBy(TunnelConnection.RECENT_ACTIVITY_MS - 1)
+
+        assertTrue(tunnel.onPushWake())
+        runCurrent()
+
+        assertNull(factory.sessions.single().abortedWith)
+        assertTrue(tunnel.state.value is TunnelState.Connected)
+        tunnel.stop()
+    }
+
+    @Test
+    fun `a wake-up shortly after a request frame keeps the connection`() = runTest {
+        val factory = ScriptedFactory(listOf(Step.EstablishThenHang))
+        val tunnel = connection(InMemoryStore(credentials), factory)
+        tunnel.start()
+        runCurrent()
+        advanceTimeBy(5 * MINUTE)
+        factory.sessions.single().request()
+        advanceTimeBy(TunnelConnection.RECENT_ACTIVITY_MS - 1)
+
+        assertTrue(tunnel.onPushWake())
+        runCurrent()
+
+        assertNull(factory.sessions.single().abortedWith)
+        tunnel.stop()
+    }
+
+    @Test
+    fun `a wake-up while a request is in flight keeps the connection`() = runTest {
+        val factory = ScriptedFactory(listOf(Step.EstablishThenHang))
+        val tunnel = connection(InMemoryStore(credentials), factory)
+        tunnel.start()
+        runCurrent()
+        advanceTimeBy(5 * MINUTE)
+        factory.sessions.single().requestsIdle.value = false
+
+        assertTrue(tunnel.onPushWake())
+        runCurrent()
+
+        assertNull(factory.sessions.single().abortedWith)
+        tunnel.stop()
+    }
+
+    @Test
+    fun `a wake-up on an old, idle connection drops it`() = runTest {
+        val factory = ScriptedFactory(listOf(Step.EstablishThenHang, Step.EstablishThenHang))
+        val tunnel = connection(InMemoryStore(credentials), factory)
+        tunnel.start()
+        runCurrent()
+        advanceTimeBy(5 * MINUTE)
+        factory.sessions.single().request()
+        advanceTimeBy(TunnelConnection.RECENT_ACTIVITY_MS)
+
+        assertTrue(tunnel.onPushWake())
+        runCurrent()
+
+        assertEquals("Relay has no connection", factory.sessions[0].abortedWith)
+        assertEquals(2, factory.sessions.size)
+        tunnel.stop()
+    }
+
+    @Test
+    fun `a wake-up while reconnecting cuts the backoff short`() = runTest {
+        val factory = ScriptedFactory(listOf(Step.Fail(), Step.EstablishThenHang))
+        val tunnel = connection(InMemoryStore(credentials), factory)
+        tunnel.start()
+        runCurrent()
+        assertTrue(tunnel.state.value is TunnelState.Reconnecting)
+
+        tunnel.onPushWake()
+        runCurrent()
+
+        assertTrue(tunnel.state.value is TunnelState.Connected)
+        assertEquals(2, factory.sessions.size)
+        tunnel.stop()
+    }
+
+    @Test
+    fun `an on-demand freeze with the screen off ends the session without the battery note`() = runTest {
+        var frozen = 0L
+        val reports = mutableListOf<Long>()
+        val tunnel = connection(
+            InMemoryStore(credentials),
+            ScriptedFactory(listOf(Step.EstablishThenHang)),
+            idleTimeoutMs = { IDLE_MS },
+            uptimeClock = { testScheduler.currentTime + frozen },
+            onFrozen = { reports += it },
+            isScreenOn = { false },
+        )
+        tunnel.start()
+        runCurrent()
+
+        frozen = 76_000
+        advanceTimeBy(TunnelConnection.FREEZE_TICK_MS)
+        runCurrent()
+
+        assertTrue((tunnel.state.value as TunnelState.Stopped).phoneAsleep)
+        assertTrue("the expected on-demand path is not worth a warning", reports.isEmpty())
+    }
+
+    @Test
+    fun `an always-connected freeze with the screen off is reported`() = runTest {
+        var frozen = 0L
+        val reports = mutableListOf<Long>()
+        val tunnel = connection(
+            InMemoryStore(credentials),
+            ScriptedFactory(listOf(Step.EstablishThenHang)),
+            idleTimeoutMs = { null },
+            uptimeClock = { testScheduler.currentTime + frozen },
+            onFrozen = { reports += it },
+            isScreenOn = { false },
+        )
+        tunnel.start()
+        runCurrent()
+
+        frozen = 76_000
+        advanceTimeBy(TunnelConnection.FREEZE_TICK_MS)
+        runCurrent()
+
+        assertTrue(tunnel.state.value is TunnelState.Connected)
+        assertEquals(listOf(76_000L), reports)
+        tunnel.stop()
+    }
+
+    @Test
+    fun `a freeze ends an on-demand session and is reported`() = runTest {
+        var frozen = 0L
+        val reports = mutableListOf<Long>()
+        val factory = ScriptedFactory(listOf(Step.EstablishThenHang))
+        val tunnel = connection(
+            InMemoryStore(credentials),
+            factory,
+            idleTimeoutMs = { IDLE_MS },
+            uptimeClock = { testScheduler.currentTime + frozen },
+            onFrozen = { reports += it },
+        )
+        tunnel.start()
+        runCurrent()
+        advanceTimeBy(10 * TunnelConnection.FREEZE_TICK_MS)
+        runCurrent()
+        assertTrue("ticks on schedule are not a freeze", tunnel.state.value is TunnelState.Connected)
+
+        // The process stopped for 76 s while the CPU ran: uptime moved on, coroutine time did not.
+        frozen = 76_000
+        advanceTimeBy(TunnelConnection.FREEZE_TICK_MS)
+        runCurrent()
+
+        val stopped = tunnel.state.value as TunnelState.Stopped
+        assertEquals(CloseCodes.NORMAL, stopped.code)
+        assertTrue(stopped.phoneAsleep)
+        assertTrue(factory.sessions.single().disconnected)
+        assertEquals(listOf(76_000L), reports)
+    }
+
+    @Test
+    fun `a freeze in always connected mode is reported but keeps the tunnel`() = runTest {
+        var frozen = 0L
+        val reports = mutableListOf<Long>()
+        val tunnel = connection(
+            InMemoryStore(credentials),
+            ScriptedFactory(listOf(Step.EstablishThenHang)),
+            idleTimeoutMs = { null },
+            uptimeClock = { testScheduler.currentTime + frozen },
+            onFrozen = { reports += it },
+        )
+        tunnel.start()
+        runCurrent()
+
+        frozen = 120_000
+        advanceTimeBy(TunnelConnection.FREEZE_TICK_MS)
+        runCurrent()
+
+        assertTrue(tunnel.state.value is TunnelState.Connected)
+        assertEquals(listOf(120_000L), reports)
+        tunnel.stop()
+    }
+
+    @Test
+    fun `a short delay is not a freeze`() = runTest {
+        var frozen = 0L
+        val reports = mutableListOf<Long>()
+        val tunnel = connection(
+            InMemoryStore(credentials),
+            ScriptedFactory(listOf(Step.EstablishThenHang)),
+            idleTimeoutMs = { IDLE_MS },
+            uptimeClock = { testScheduler.currentTime + frozen },
+            onFrozen = { reports += it },
+        )
+        tunnel.start()
+        runCurrent()
+
+        frozen = TunnelConnection.FROZEN_THRESHOLD_MS
+        advanceTimeBy(TunnelConnection.FREEZE_TICK_MS)
+        runCurrent()
+
+        assertTrue(tunnel.state.value is TunnelState.Connected)
+        assertTrue(reports.isEmpty())
+        tunnel.stop()
     }
 
     private companion object {

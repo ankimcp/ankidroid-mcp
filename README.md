@@ -62,7 +62,10 @@ The app targets API 36 (Android 16), as Google Play requires; see docs/DECISIONS
 
 1. Install the APK and open **AnkiDroid MCP**.
 2. Onboarding: confirm AnkiDroid is installed and grant access to its database. Optionally turn
-   off battery optimisation for the app so the connection survives Doze.
+   off battery optimisation for the app so the connection survives Doze. On Oppo, Realme,
+   OnePlus, Xiaomi, Vivo and Huawei/Honor phones the system also freezes background apps; the
+   battery card names the maker's own setting to turn off (on ColorOS: "Allow background
+   activity").
 3. Sign in: tap **Sign in**, then **Open sign-in page**. Check that the page shows the same code,
    approve, and the app continues automatically. On Android 13+ the app then asks to show
    notifications; allow it, or you won't see when Claude wakes the phone.
@@ -73,9 +76,11 @@ The app targets API 36 (Android 16), as Google Play requires; see docs/DECISIONS
 
 - **On demand** (default): when Claude makes a request and the phone is not connected, the
   AnkiMCP server sends a push message, the app connects (the notification appears), answers,
-  and disconnects again after 15, 30 (default) or 60 minutes without requests. Connecting by
-  hand works the same way. The Status screen shows whether push is registered and, while
-  connected, when the idle disconnect will happen. If push is not available (no Firebase config
+  and disconnects again after 15, 30 (default) or 60 minutes without requests, or as soon as
+  the screen turns off (or the phone freezes the app). Turning the screen back on does not
+  reconnect; Claude's next request wakes the phone again. Connecting by hand works the same
+  way. The Status screen shows whether push is registered and, while connected, when the idle
+  disconnect will happen. If push is not available (no Firebase config
   in the build, or the phone's current push token is not registered with the server), on demand
   behaves like a manual connection that stays open until you tap **Disconnect**.
 - **Always connected**: the previous "Keep connected" behaviour. The app connects on launch and

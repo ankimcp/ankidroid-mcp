@@ -18,6 +18,14 @@ object AndroidElapsedClock : ElapsedClock {
     override fun elapsedMs(): Long = SystemClock.elapsedRealtime()
 }
 
+/**
+ * `SystemClock.uptimeMillis()`: stops while the CPU is suspended, like coroutine timers. A tick
+ * that is late on this clock means the process was not scheduled while the CPU ran (frozen).
+ */
+object AndroidUptimeClock : ElapsedClock {
+    override fun elapsedMs(): Long = SystemClock.uptimeMillis()
+}
+
 /** Non-reference-counted `PARTIAL_WAKE_LOCK`s, one per acquisition, always with a timeout. */
 class AndroidWakeLocks(context: Context) : WakeLocks {
     private val power = context.applicationContext.getSystemService(PowerManager::class.java)

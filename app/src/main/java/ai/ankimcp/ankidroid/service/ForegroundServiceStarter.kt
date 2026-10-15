@@ -1,6 +1,7 @@
 package ai.ankimcp.ankidroid.service
 
 import ai.ankimcp.ankidroid.log.TunnelLog
+import ai.ankimcp.ankidroid.tunnel.TunnelState
 
 /** Shown when Android refused to start the tunnel service from the background. */
 const val SERVICE_START_BLOCKED_REASON = "Could not start in the background. Open the app to connect."
@@ -45,3 +46,14 @@ internal fun startTunnelForServiceStart(readExtra: (key: String, default: Boolea
 internal fun startTunnelUnlessCallerDid(callerStartsTunnel: Boolean, startTunnel: () -> Unit) {
     if (!callerStartsTunnel) startTunnel()
 }
+
+/**
+ * Whether the service stops after its state collector saw [collected]. The collector runs on
+ * the main thread behind the tunnel: a wake-up may already have started a new run, which sets
+ * the state to Connecting synchronously, so the [current] state must still be Stopped too.
+ * (`isRunning` can't be used: a run that ends by itself publishes Stopped while its job is still
+ * active.) A wake-up's start that is queued but not yet delivered is covered by the service
+ * stopping with `stopSelfResult(lastStartId)`.
+ */
+internal fun serviceShouldStop(collected: TunnelState, current: TunnelState): Boolean =
+    collected is TunnelState.Stopped && current is TunnelState.Stopped
