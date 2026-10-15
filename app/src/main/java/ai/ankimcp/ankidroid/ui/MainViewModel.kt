@@ -4,6 +4,8 @@ import ai.ankimcp.ankidroid.anki.AnkiDroidAvailability
 import ai.ankimcp.ankidroid.appGraph
 import ai.ankimcp.ankidroid.auth.AuthException
 import ai.ankimcp.ankidroid.auth.DeviceFlowClient
+import ai.ankimcp.ankidroid.log.LogReport
+import ai.ankimcp.ankidroid.log.LogReportHeader
 import ai.ankimcp.ankidroid.push.PushRegistrationState
 import ai.ankimcp.ankidroid.service.FreezingOem
 import ai.ankimcp.ankidroid.service.TunnelForegroundService
@@ -13,6 +15,7 @@ import ai.ankimcp.ankidroid.settings.ConnectionMode
 import ai.ankimcp.ankidroid.settings.IdleWindow
 import ai.ankimcp.ankidroid.tunnel.TunnelState
 import android.app.Application
+import android.os.Build
 import android.os.PowerManager
 import android.os.SystemClock
 import androidx.lifecycle.AndroidViewModel
@@ -82,6 +85,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val idleDisconnectAt: StateFlow<Long?> = graph.tunnel.idleDeadlineMs
         .map { deadline -> deadline?.let { System.currentTimeMillis() + (it - SystemClock.elapsedRealtime()) } }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS), null)
+
+    val appVersion: String = graph.config.appVersion
 
     /** MCP URL to paste into Claude: replaced by the relay's own URL once connected. */
     val defaultMcpUrl: String = DeviceFlowClient.wsUrlToHttp(graph.config.tunnelUrl).trimEnd('/') + "/mcp"
@@ -193,6 +198,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         graph.settings.setIdleWindow(window)
         graph.tunnel.onIdleSettingsChanged()
     }
+
+    fun clearLog() {
+        graph.log.clear()
+    }
+
+    /** The log as shared text: device header, no account details, token- and email-shaped text redacted. */
+    fun logReport(): String = LogReport.format(
+        header = LogReportHeader(
+            appVersion = appVersion,
+            androidVersion = "${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})",
+            device = LogReport.deviceName(Build.MANUFACTURER, Build.MODEL),
+            connectionMode = describe(connectionMode.value),
+            pushRegistered = wakeUpsReady.value,
+        ),
+        entries = logEntries.value,
+        secrets = listOfNotNull(credentials.value?.user?.email, credentials.value?.user?.id?.takeIf { it.length >= 8 }),
+    )
 
     /** Removes the push token server-side first; credentials are cleared once that is done. */
     fun logout() {

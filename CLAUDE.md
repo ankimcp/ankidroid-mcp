@@ -46,8 +46,10 @@ app/src/main/java/ai/ankimcp/ankidroid/
                AndroidWakeSupport (elapsedRealtime, uptime, wake locks, while-idle alarms + receiver),
                SignInNotifications ("Sign in again" notification), NotificationPermission
                (permission, app switch and channel check per notification, logs dropped ones)
-  ui/          MainActivity, MainViewModel, Onboarding/SignIn/Status screens, Theme
-  log/         TunnelLog (100-entry ring buffer shown in the UI)
+  ui/          MainActivity (Status/Log/About bottom navigation), MainViewModel, Onboarding/SignIn/
+               Status/Log/About screens, Clipboard, Theme (brand colours + StatusColors)
+  log/         TunnelLog (100-entry ring buffer shown in the UI), LogReport (shared-log text and
+               redaction)
 app/src/test/java/...          JVM unit tests (JUnit 4, coroutines-test, MockWebServer)
 ```
 

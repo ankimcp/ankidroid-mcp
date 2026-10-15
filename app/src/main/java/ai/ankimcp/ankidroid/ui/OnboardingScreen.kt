@@ -105,7 +105,9 @@ fun BatteryCard(
     val context = LocalContext.current
     Card(modifier = modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Optional: battery", style = MaterialTheme.typography.titleMedium)
+            // Not optional on a freezing maker without the exemption, or once a freeze happened.
+            val needed = freezeDetected || (oem != null && !unrestricted)
+            Text(if (needed) "Battery" else "Optional: battery", style = MaterialTheme.typography.titleMedium)
             if (freezeDetected) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
@@ -129,7 +131,7 @@ fun BatteryCard(
                     },
                 )
             }
-            if (oem != null) Text(oem.instructions, style = MaterialTheme.typography.bodySmall)
+            if (oem != null) SupportingText(oem.instructions)
             when {
                 // The maker's switches live on the app's own page; there is no public intent for its battery sub-page.
                 oem != null -> OutlinedButton(onClick = { openAppSettings(context) }) { Text("Open app info") }

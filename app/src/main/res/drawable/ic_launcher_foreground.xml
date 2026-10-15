@@ -1,17 +1,26 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Placeholder: two stacked cards with a link dot. Replace with final branding before release. -->
+<!-- Barn-owl face from ankimcp.ai static/favicon.svg (120 units), scaled 0.66 into the 66dp safe zone (D45). -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <path
-        android:fillColor="#8FB8E8"
-        android:pathData="M38,34h36a4,4 0,0 1,4 4v28a4,4 0,0 1,-4 4h-36a4,4 0,0 1,-4 -4v-28a4,4 0,0 1,4 -4z" />
-    <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M32,40h36a4,4 0,0 1,4 4v28a4,4 0,0 1,-4 4h-36a4,4 0,0 1,-4 -4v-28a4,4 0,0 1,4 -4z" />
-    <path
-        android:fillColor="#1E3A5F"
-        android:pathData="M50,58m-6,0a6,6 0,1 1,12 0a6,6 0,1 1,-12 0" />
+    <group
+        android:scaleX="0.66"
+        android:scaleY="0.66"
+        android:translateX="14.4"
+        android:translateY="11.76">
+        <path
+            android:fillColor="#F0E4C5"
+            android:strokeColor="#D4A84A"
+            android:strokeWidth="3"
+            android:strokeLineJoin="round"
+            android:pathData="M60,104C52,104 20,84 18,52C17,34 28,24 40,28C48,31 55,38 60,44C65,38 72,31 80,28C92,24 103,34 102,52C100,84 68,104 60,104Z" />
+        <path
+            android:fillColor="#1A2550"
+            android:pathData="M37,58a7,10 0,1 0,14 0a7,10 0,1 0,-14 0zM69,58a7,10 0,1 0,14 0a7,10 0,1 0,-14 0z" />
+        <path
+            android:fillColor="#D4A84A"
+            android:pathData="M60,74L54,88L66,88Z" />
+    </group>
 </vector>

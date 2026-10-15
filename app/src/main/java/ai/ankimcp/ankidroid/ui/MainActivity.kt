@@ -1,33 +1,50 @@
 package ai.ankimcp.ankidroid.ui
 
+import ai.ankimcp.ankidroid.R
 import ai.ankimcp.ankidroid.tunnel.TunnelState
 import android.Manifest
 import android.os.Build
 import android.os.Bundle
+import androidx.annotation.DrawableRes
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.repeatOnLifecycle
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     private val viewModel: MainViewModel by viewModels()
@@ -97,14 +114,53 @@ private fun AppRoot(viewModel: MainViewModel) {
         }
     }
 
+    val snackbarHostState = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
+    val showMessage: (String) -> Unit = { message ->
+        scope.launch {
+            snackbarHostState.currentSnackbarData?.dismiss()
+            snackbarHostState.showSnackbar(message)
+        }
+    }
+    var tab by rememberSaveable { mutableStateOf(MainTab.Status) }
+    val user = credentials?.user
+    val signedIn = environment.ankiReady && credentialsLoaded && user != null
+    // Not while credentials are still loading: after process death that would discard the restored tab.
+    val signedOut = !environment.ankiReady || (credentialsLoaded && user == null)
+    LaunchedEffect(signedOut) { if (signedOut) tab = MainTab.Status }
+    BackHandler(enabled = signedIn && tab != MainTab.Status) { tab = MainTab.Status }
+
     Scaffold(
         modifier = Modifier.fillMaxSize(),
-        topBar = { CenterAlignedTopAppBar(title = { Text("AnkiDroid MCP") }) },
+        topBar = {
+            CenterAlignedTopAppBar(
+                title = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        OwlMark(size = 28.dp)
+                        Text("AnkiDroid MCP", Modifier.padding(start = 10.dp))
+                    }
+                },
+            )
+        },
+        bottomBar = {
+            if (signedIn) {
+                NavigationBar {
+                    MainTab.entries.forEach { item ->
+                        NavigationBarItem(
+                            selected = tab == item,
+                            onClick = { tab = item },
+                            icon = { Icon(painterResource(item.icon), contentDescription = null) },
+                            label = { Text(item.label) },
+                        )
+                    }
+                }
+            }
+        },
+        snackbarHost = { SnackbarHost(snackbarHostState) },
     ) { padding ->
         val contentModifier = Modifier
             .fillMaxSize()
             .padding(padding)
-        val user = credentials?.user
         when {
             !environment.ankiReady -> OnboardingScreen(
                 environment = environment,
@@ -122,6 +178,14 @@ private fun AppRoot(viewModel: MainViewModel) {
                 onOpenFailed = viewModel::failSignIn,
                 modifier = contentModifier,
             )
+            tab == MainTab.Log -> LogScreen(
+                entries = logEntries,
+                report = viewModel::logReport,
+                onClear = viewModel::clearLog,
+                onMessage = showMessage,
+                modifier = contentModifier,
+            )
+            tab == MainTab.About -> AboutScreen(appVersion = viewModel.appVersion, modifier = contentModifier)
             else -> StatusScreen(
                 user = user,
                 tunnelState = tunnelState,
@@ -140,7 +204,6 @@ private fun AppRoot(viewModel: MainViewModel) {
                     freezeDetected = freezeDetected,
                 ),
                 notificationsShown = environment.notificationsShown,
-                logEntries = logEntries,
                 signingOut = signingOut,
                 onConnect = connect,
                 onDisconnect = viewModel::disconnect,
@@ -148,8 +211,16 @@ private fun AppRoot(viewModel: MainViewModel) {
                 onIdleWindowChange = viewModel::setIdleWindow,
                 onDismissFreezeNotice = viewModel::dismissFreezeNotice,
                 onLogout = viewModel::logout,
+                onMessage = showMessage,
                 modifier = contentModifier,
             )
         }
     }
+}
+
+/** Top-level destinations once signed in (D47). */
+internal enum class MainTab(val label: String, @param:DrawableRes val icon: Int) {
+    Status("Status", R.drawable.ic_nav_status),
+    Log("Log", R.drawable.ic_nav_log),
+    About("About", R.drawable.ic_nav_about),
 }
