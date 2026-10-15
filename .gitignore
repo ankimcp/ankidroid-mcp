@@ -29,3 +29,9 @@ output-metadata.json
 
 # Firebase config (lives in Bitwarden, see README)
 google-services.json
+
+# never commit secrets
+.env
+.env.*
+*.pem
+*.p12
