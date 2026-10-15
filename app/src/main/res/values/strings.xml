@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">AnkiDroid MCP</string>
+    <string name="notification_channel_name">Tunnel status</string>
+    <string name="notification_channel_description">Shows whether your AnkiDroid collection is reachable by your AI assistant.</string>
+    <string name="notification_action_disconnect">Disconnect</string>
+</resources>
