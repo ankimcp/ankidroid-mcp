@@ -4,31 +4,42 @@ import ai.ankimcp.ankidroid.anki.AnkiDroidAvailability
 import ai.ankimcp.ankidroid.appGraph
 import ai.ankimcp.ankidroid.auth.AuthException
 import ai.ankimcp.ankidroid.auth.DeviceFlowClient
+import ai.ankimcp.ankidroid.push.PushRegistrationState
 import ai.ankimcp.ankidroid.service.TunnelForegroundService
+import ai.ankimcp.ankidroid.service.allNotificationsShown
+import ai.ankimcp.ankidroid.service.hasNotificationPermission
+import ai.ankimcp.ankidroid.settings.ConnectionMode
+import ai.ankimcp.ankidroid.settings.IdleWindow
 import ai.ankimcp.ankidroid.tunnel.TunnelState
-import android.Manifest
 import android.app.Application
-import android.content.pm.PackageManager
-import android.os.Build
 import android.os.PowerManager
-import androidx.core.content.ContextCompat
+import android.os.SystemClock
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.receiveAsFlow
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
 data class EnvironmentStatus(
     val ankiInstalled: Boolean,
     val ankiPermissionGranted: Boolean,
     val batteryUnrestricted: Boolean,
+    /** POST_NOTIFICATIONS (Android 13+); what the runtime permission request can change. */
     val notificationsGranted: Boolean,
+    /** The permission, the app's notification switch and every channel are on. */
+    val notificationsShown: Boolean,
 ) {
     val ankiReady: Boolean get() = ankiInstalled && ankiPermissionGranted
 }
@@ -56,7 +67,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val credentialsLoaded = graph.credentialStore.loaded
     val tunnelState: StateFlow<TunnelState> = graph.tunnel.state
     val logEntries = graph.log.entries
-    val keepConnected = graph.settings.keepConnected
+    val connectionMode: StateFlow<ConnectionMode> = graph.settings.mode
+    val idleWindow: StateFlow<IdleWindow> = graph.settings.idleWindow
+    val pushState: StateFlow<PushRegistrationState> = graph.push.state
+
+    /** The current FCM token is registered, so on-demand sessions end when idle. */
+    val wakeUpsReady: StateFlow<Boolean> = graph.push.wakeUpsReadyState
+
+    /** False when this build has no `google-services.json`. */
+    val pushAvailable: Boolean = graph.push.isAvailable
+
+    /** Wall-clock time at which the idle timer will disconnect, or null when it is not running. */
+    val idleDisconnectAt: StateFlow<Long?> = graph.tunnel.idleDeadlineMs
+        .map { deadline -> deadline?.let { System.currentTimeMillis() + (it - SystemClock.elapsedRealtime()) } }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS), null)
 
     /** MCP URL to paste into Claude: replaced by the relay's own URL once connected. */
     val defaultMcpUrl: String = DeviceFlowClient.wsUrlToHttp(graph.config.tunnelUrl).trimEnd('/') + "/mcp"
@@ -66,6 +90,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _signIn = MutableStateFlow<SignInState>(SignInState.Idle)
     val signIn: StateFlow<SignInState> = _signIn.asStateFlow()
+
+    private val _signingOut = MutableStateFlow(false)
+
+    /** True while logout removes the push token before clearing credentials. */
+    val signingOut: StateFlow<Boolean> = _signingOut.asStateFlow()
+
+    private val _notificationPermissionRequests = Channel<Unit>(Channel.CONFLATED)
+
+    /**
+     * Asks the activity to request POST_NOTIFICATIONS (Android 13+): after sign-in and when on
+     * demand is chosen, since a woken session's notification and the "Sign in again"
+     * notification are otherwise invisible.
+     */
+    val notificationPermissionRequests: Flow<Unit> = _notificationPermissionRequests.receiveAsFlow()
 
     private var signInJob: Job? = null
 
@@ -91,7 +129,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 )
                 graph.credentialStore.save(credentials)
                 graph.log.info("Signed in")
+                graph.signInNotifier.dismiss()
+                // App scope: registration must not be cancelled when the screen goes away.
+                graph.appScope.launch(Dispatchers.IO) { graph.push.onSignedIn() }
                 _signIn.value = SignInState.Idle
+                requestNotificationPermission()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: AuthException) {
@@ -119,25 +161,54 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         TunnelForegroundService.start(getApplication())
     }
 
-    /** Also turns off "keep connected" (see [TunnelForegroundService.stop]). */
+    /** Also leaves "Always connected" (see [TunnelForegroundService.stop]). */
     fun disconnect() {
         TunnelForegroundService.stop(getApplication())
     }
 
-    fun setKeepConnected(value: Boolean) {
-        graph.settings.setKeepConnected(value)
+    fun setConnectionMode(mode: ConnectionMode) {
+        if (mode == ConnectionMode.OnDemand) requestNotificationPermission()
+        if (graph.settings.mode.value == mode) return
+        graph.settings.setMode(mode)
+        graph.log.info("Connection mode: ${describe(mode)}")
+        graph.tunnel.onIdleSettingsChanged()
     }
 
+    fun setIdleWindow(window: IdleWindow) {
+        if (graph.settings.idleWindow.value == window) return
+        graph.settings.setIdleWindow(window)
+        graph.tunnel.onIdleSettingsChanged()
+    }
+
+    /** Removes the push token server-side first; credentials are cleared once that is done. */
     fun logout() {
-        disconnect()
-        graph.credentialStore.clear()
-        graph.settings.setKeepConnected(false)
-        graph.log.info("Signed out")
+        if (_signingOut.value) return
+        _signingOut.value = true
+        // Before the disconnect, so a wake-up arriving in between cannot reconnect.
+        graph.push.beginLogout()
+        try {
+            disconnect()
+            graph.appScope.launch(Dispatchers.IO) {
+                try {
+                    graph.push.logout { graph.credentialStore.clear() }
+                    // A wake-up that got past the signing-out check may have started a run meanwhile.
+                    graph.tunnel.stop("Signed out")
+                    graph.log.info("Signed out")
+                } finally {
+                    _signingOut.value = false
+                }
+            }
+        } catch (e: Exception) {
+            // Nothing was cleared: leave the button usable and wake-ups/registrations working.
+            graph.push.abortLogout()
+            _signingOut.value = false
+            graph.log.warn("Could not sign out: ${e.message ?: e.javaClass.simpleName}")
+        }
     }
 
     /**
-     * Auto-connect only when the user opted in; never on first launch (flag defaults to false).
-     * Deferred until the process is in the foreground (see [autoConnectWhenForeground]).
+     * Auto-connect only in "Always connected" mode; never on first launch (on demand is the
+     * default). Deferred until the process is in the foreground (see [autoConnectWhenForeground]).
      */
     fun autoConnectIfEnabled() {
         viewModelScope.launch {
@@ -146,7 +217,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 inForeground = ProcessLifecycleOwner.get().lifecycle.currentStateFlow
                     .map { it.isAtLeast(Lifecycle.State.STARTED) },
                 shouldConnect = {
-                    keepConnected.value && credentials.value != null && environment.value.ankiReady &&
+                    graph.settings.alwaysConnected && credentials.value != null && environment.value.ankiReady &&
                         !graph.tunnel.isRunning
                 },
                 connect = ::connect,
@@ -154,17 +225,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private fun requestNotificationPermission() {
+        if (!hasNotificationPermission(getApplication())) _notificationPermissionRequests.trySend(Unit)
+    }
+
     private fun readEnvironment(): EnvironmentStatus {
         val app = getApplication<Application>()
         val power = app.getSystemService(PowerManager::class.java)
-        val notificationsGranted = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
-            ContextCompat.checkSelfPermission(app, Manifest.permission.POST_NOTIFICATIONS) ==
-            PackageManager.PERMISSION_GRANTED
         return EnvironmentStatus(
             ankiInstalled = graph.ankiAvailability.isInstalled(),
             ankiPermissionGranted = graph.ankiAvailability.hasPermission(),
             batteryUnrestricted = power.isIgnoringBatteryOptimizations(app.packageName),
-            notificationsGranted = notificationsGranted,
+            notificationsGranted = hasNotificationPermission(app),
+            notificationsShown = allNotificationsShown(app),
         )
     }
 
@@ -174,7 +247,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         else -> "Sign-in failed: ${e.message}"
     }
 
+    private fun describe(mode: ConnectionMode): String = when (mode) {
+        ConnectionMode.OnDemand -> "on demand"
+        ConnectionMode.Always -> "always connected"
+    }
+
     companion object {
         const val ANKI_PERMISSION = AnkiDroidAvailability.PERMISSION
+        private const val STOP_TIMEOUT_MS = 5_000L
     }
 }

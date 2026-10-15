@@ -4,4 +4,8 @@
     <string name="notification_channel_name">Tunnel status</string>
     <string name="notification_channel_description">Shows whether your AnkiDroid collection is reachable by your AI assistant.</string>
     <string name="notification_action_disconnect">Disconnect</string>
+    <string name="account_channel_name">Account</string>
+    <string name="account_channel_description">Tells you when you need to sign in to AnkiMCP again.</string>
+    <string name="sign_in_required_title">Sign in again to AnkiMCP</string>
+    <string name="sign_in_required_text">Claude tried to reach your decks, but your session has expired.</string>
 </resources>

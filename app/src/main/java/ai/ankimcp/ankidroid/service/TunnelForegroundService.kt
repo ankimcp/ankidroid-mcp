@@ -26,6 +26,7 @@ import kotlinx.coroutines.launch
 /**
  * Keeps the process alive while the tunnel runs and shows its status. The tunnel itself lives
  * in [ai.ankimcp.ankidroid.AppGraph]; this service only starts/stops it and mirrors its state.
+ * It stops itself whenever the tunnel stops, including after an on-demand idle timeout.
  */
 class TunnelForegroundService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -36,18 +37,23 @@ class TunnelForegroundService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val graph = appGraph
         if (intent?.action == ACTION_STOP) {
-            // An explicit Disconnect also turns off auto-reconnect, same as in the app.
-            graph.settings.setKeepConnected(false)
+            // An explicit Disconnect also leaves "Always connected", same as in the app.
+            graph.settings.onUserDisconnect()
             graph.tunnel.stop()
             shutdown()
             return START_NOT_STICKY
         }
 
         ensureChannel()
+        // Without the permission (Android 13+) the service still runs, with a hidden notification.
+        graph.notificationPermission.allows("tunnel status notification", CHANNEL_ID)
         startInForeground(buildNotification(graph.tunnel.state.value))
 
         graph.networkMonitor.start { changed -> graph.tunnel.onNetworkAvailable(changed) }
-        graph.tunnel.start()
+        startTunnelForServiceStart(
+            readExtra = { key, default -> intent?.getBooleanExtra(key, default) ?: default },
+            startTunnel = graph.tunnel::start,
+        )
 
         if (stateJob == null) {
             stateJob = scope.launch {
@@ -61,8 +67,8 @@ class TunnelForegroundService : Service() {
                 }
             }
         }
-        // Not sticky: after a process kill we only come back via the app or BootReceiver,
-        // both of which respect the user's "keep connected" choice.
+        // Not sticky: after a process kill we only come back via the app, BootReceiver or a
+        // push wake-up, all of which respect the user's connection mode.
         return START_NOT_STICKY
     }
 
@@ -121,7 +127,7 @@ class TunnelForegroundService : Service() {
     }
 
     companion object {
-        private const val CHANNEL_ID = "tunnel"
+        private const val CHANNEL_ID = NotificationChannels.TUNNEL
         private const val NOTIFICATION_ID = 1
         private const val ACTION_START = "ai.ankimcp.ankidroid.action.START"
         private const val ACTION_STOP = "ai.ankimcp.ankidroid.action.STOP"
@@ -129,21 +135,22 @@ class TunnelForegroundService : Service() {
         /**
          * Starts the tunnel service. Returns false if Android refused the start (app in the
          * background); the tunnel state then says so (see [startForegroundServiceSafely]).
+         * With [callerStartsTunnel] the service leaves starting the tunnel to the caller (see
+         * [startTunnelUnlessCallerDid]).
          */
-        fun start(context: Context): Boolean {
+        fun start(context: Context, callerStartsTunnel: Boolean = false): Boolean {
             val graph = context.appGraph
             return startForegroundServiceSafely(graph.log, graph.tunnel::reportStartBlocked) {
-                ContextCompat.startForegroundService(
-                    context,
-                    Intent(context, TunnelForegroundService::class.java).setAction(ACTION_START),
-                )
+                val intent = Intent(context, TunnelForegroundService::class.java).setAction(ACTION_START)
+                serviceStartExtras(callerStartsTunnel).forEach { (key, value) -> intent.putExtra(key, value) }
+                ContextCompat.startForegroundService(context, intent)
             }
         }
 
-        /** User-initiated disconnect from the app; also turns off "keep connected". */
+        /** User-initiated disconnect from the app; also leaves "Always connected". */
         fun stop(context: Context) {
             val graph = context.appGraph
-            graph.settings.setKeepConnected(false)
+            graph.settings.onUserDisconnect()
             graph.tunnel.stop()
             context.stopService(Intent(context, TunnelForegroundService::class.java))
         }

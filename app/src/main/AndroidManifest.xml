@@ -45,7 +45,21 @@
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Keeps a user-initiated outbound WebSocket to the AnkiMCP relay open so that an AI assistant chosen by the user (e.g. Claude) can read the user's local AnkiDroid flashcard collection on request. Started only after the user taps Connect, shows a persistent notification with a Disconnect action, and stops when the user disconnects." />
+                android:value="Keeps an outbound WebSocket to the AnkiMCP relay open so that an AI assistant chosen by the user (e.g. Claude) can read the user's local AnkiDroid flashcard collection on request. Started when the user taps Connect, or by a high-priority push message that the AnkiMCP server sends when the user's assistant makes a request. Shows a persistent notification with a Disconnect action, and stops when the user disconnects or after a user-chosen idle period (15 to 60 minutes) without requests." />
+        </service>
+
+        <!-- No FCM token before sign-in: PushCoordinator turns auto-init on after sign-in and off at logout (D39). -->
+        <meta-data
+            android:name="firebase_messaging_auto_init_enabled"
+            android:value="false" />
+
+        <!-- FCM wake-ups and token updates. Inert in builds without google-services.json. -->
+        <service
+            android:name=".push.AnkiMcpMessagingService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
         </service>
 
         <receiver
@@ -57,7 +71,7 @@
             </intent-filter>
         </receiver>
 
-        <!-- Explicit-intent target of the reconnect/liveness alarm (AlarmWakeupScheduler). -->
+        <!-- Explicit-intent target of the reconnect/liveness and idle-deadline alarms (AlarmWakeupScheduler). -->
         <receiver
             android:name=".service.TunnelAlarmReceiver"
             android:exported="false" />

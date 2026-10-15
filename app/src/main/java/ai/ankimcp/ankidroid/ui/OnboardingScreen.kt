@@ -101,6 +101,21 @@ fun BatteryCard(unrestricted: Boolean, modifier: Modifier = Modifier) {
 }
 
 @Composable
+fun NotificationsCard(granted: Boolean, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    StepCard(
+        title = "Notifications",
+        done = granted,
+        doneText = "Notifications are allowed.",
+        todoText = "Notifications are off. When Claude wakes the phone you won't see that it connected, " +
+            "you won't be told when you need to sign in again, and Android may deliver wake-ups late.",
+        modifier = modifier,
+    ) {
+        OutlinedButton(onClick = { openNotificationSettings(context) }) { Text("Open notification settings") }
+    }
+}
+
+@Composable
 private fun StepCard(
     title: String,
     done: Boolean,
@@ -140,6 +155,16 @@ private fun openAppSettings(context: Context) {
 private fun openBatterySettings(context: Context) {
     try {
         context.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+    } catch (_: ActivityNotFoundException) {
+        openAppSettings(context)
+    }
+}
+
+private fun openNotificationSettings(context: Context) {
+    try {
+        context.startActivity(
+            Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName),
+        )
     } catch (_: ActivityNotFoundException) {
         openAppSettings(context)
     }

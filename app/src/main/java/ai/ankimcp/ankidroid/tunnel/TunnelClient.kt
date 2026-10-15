@@ -65,7 +65,8 @@ fun interface JsonRpcHandler {
  * [handshakeTimeoutMs] of the open, like the add-on's `open_timeout` + handshake wait.
  * Requests are served concurrently, each under a wake lock; pings are answered inline. If no
  * server ping arrives for [healthTimeoutMs] (measured on [clock], which keeps counting while
- * the CPU sleeps) the socket is dropped and [run] returns 1001.
+ * the CPU sleeps) the socket is dropped and [run] returns 1001. [onRequest] is called for every
+ * `request` frame before it is handled (drives the idle timer).
  */
 class TunnelClient(
     private val http: OkHttpClient,
@@ -77,6 +78,7 @@ class TunnelClient(
     private val clock: ElapsedClock,
     private val wakeLocks: WakeLocks = WakeLocks.None,
     private val onEstablished: (url: String) -> Unit = {},
+    private val onRequest: () -> Unit = {},
     private val onServerError: (code: String, message: String) -> Unit = { _, _ -> },
     private val openTimeoutMs: Long = ProtocolConstants.OPEN_TIMEOUT_MS,
     private val handshakeTimeoutMs: Long = ProtocolConstants.CONNECTION_TIMEOUT_MS,
@@ -228,6 +230,7 @@ class TunnelClient(
                     }
                     when (message) {
                         is ServerMessage.Request -> {
+                            onRequest()
                             // Taken before the coroutine is dispatched so the CPU cannot suspend in between.
                             val wakeLock = wakeLocks.acquire("request", requestTimeoutMs + WAKE_LOCK_SLACK_MS)
                             // Released on completion, which also covers a request cancelled before it ran.
