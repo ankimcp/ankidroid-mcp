@@ -1,10 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- The launcher owl as a white silhouette (eyes and beak cut out), fitted into 20 of the 24dp. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="24dp"
     android:height="24dp"
     android:viewportWidth="24"
     android:viewportHeight="24">
-    <path
-        android:fillColor="#FFFFFFFF"
-        android:pathData="M5,6h12a2,2 0,0 1,2 2v8a2,2 0,0 1,-2 2h-12a2,2 0,0 1,-2 -2v-8a2,2 0,0 1,2 -2zM11,12m-2.5,0a2.5,2.5 0,1 1,5 0a2.5,2.5 0,1 1,-5 0" />
+    <group
+        android:scaleX="0.238"
+        android:scaleY="0.238"
+        android:translateX="-2.28"
+        android:translateY="-3.23">
+        <path
+            android:fillColor="#FFFFFFFF"
+            android:fillType="evenOdd"
+            android:pathData="M60,104C52,104 20,84 18,52C17,34 28,24 40,28C48,31 55,38 60,44C65,38 72,31 80,28C92,24 103,34 102,52C100,84 68,104 60,104ZM37,58a7,10 0,1 0,14 0a7,10 0,1 0,-14 0zM69,58a7,10 0,1 0,14 0a7,10 0,1 0,-14 0zM60,74L54,88L66,88Z" />
+    </group>
 </vector>

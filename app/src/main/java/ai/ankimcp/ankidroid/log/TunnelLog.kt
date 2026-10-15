@@ -15,10 +15,10 @@ data class LogEntry(
 }
 
 /**
- * Fixed-size ring buffer of recent tunnel events, shown on the Status screen.
+ * Fixed-size ring buffer of recent tunnel events, shown on the Log tab.
  *
- * Never pass tokens or other secrets to this log: it is rendered verbatim in the UI
- * and mirrored to logcat.
+ * Never pass tokens or other secrets to this log: it is rendered verbatim in the UI,
+ * mirrored to logcat and shared by the user (redacted, see [LogReport]).
  */
 class TunnelLog(
     private val capacity: Int = DEFAULT_CAPACITY,

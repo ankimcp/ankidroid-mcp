@@ -1,25 +1,73 @@
 # AnkiDroid MCP
 
-An Android app that lets an AI assistant (Claude) read your AnkiDroid collection.
+AnkiDroid MCP lets Claude work with the AnkiDroid collection on your Android phone. The app
+runs on the phone, reads AnkiDroid through AnkiDroid's official API (its ContentProvider), and
+answers Claude's MCP requests that reach it through the AnkiMCP tunnel. The phone opens an
+outbound connection only; no ports are opened on it. This version has one read-only tool,
+`list_decks` (deck names, ids and today's due counts).
 
-It signs in to your AnkiMCP account, opens an outbound WebSocket to the AnkiMCP tunnel
-relay, and answers MCP requests that the relay forwards from Claude. Your phone needs no
-open ports; the relay exposes `https://tunnel.ankimcp.ai/mcp` and routes requests for your
-account to the phone. By default the phone does not keep that connection open: the server
-wakes it with a push message when Claude needs it.
-
-Phase 1 exposes one read-only tool, `list_decks` (deck names, ids and today's due counts),
-read through AnkiDroid's official ContentProvider.
+<!-- Screenshots: Status, Log and About tabs, side by side. -->
 
 ## Requirements
 
-- Android 8.0 (API 26) or newer, with [AnkiDroid](https://play.google.com/store/apps/details?id=com.ichi2.anki)
-  installed and set up (opened once).
-- An AnkiMCP account (the same one used with the desktop add-on or CLI).
-- For push wake-ups: Google Play services on the phone, and a build that includes the Firebase
-  config (below).
+- Android 8.0 (API 26) or newer.
+- [AnkiDroid](https://play.google.com/store/apps/details?id=com.ichi2.anki), set up (opened
+  once), with its API enabled (Settings > Advanced > "Enable AnkiDroid API", on by default).
+- An [AnkiMCP](https://ankimcp.ai) account (the same one you use with the desktop add-on or
+  CLI).
+- For on-demand wake-ups: Google Play services on the phone.
 
-## Build
+## Install
+
+- Google Play: coming soon.
+- GitHub: download `ankidroid-mcp-<version>.apk` and `SHA256SUMS.txt` from
+  [Releases](https://github.com/ankimcp/ankidroid-mcp/releases), check the file, then open
+  the APK on the phone:
+
+  ```sh
+  shasum -a 256 -c SHA256SUMS.txt
+  ```
+
+  The Play and GitHub builds are signed with different keys, so one cannot be installed over
+  the other; uninstall first when switching.
+
+## Setup
+
+1. Open **AnkiDroid MCP** and grant access to AnkiDroid when asked.
+2. Tap **Sign in**, open the sign-in page, check that it shows the same code, and approve.
+   On Android 13+ allow notifications too, or you won't see when Claude wakes the phone.
+3. On the **Status** tab, tap **Connect**.
+4. In Claude, open Settings > Connectors > Add custom connector, paste the MCP server URL from
+   the Status tab (**Copy URL**), and sign in with the same AnkiMCP account. Then ask Claude
+   to "list my Anki decks".
+
+**Connection modes.** *On demand* (the default) lets Claude wake the phone with a push message
+and disconnects when the screen turns off or after 15-60 idle minutes; *Always connected* keeps
+the tunnel open and uses more battery.
+
+**Battery.** Realme, Oppo and OnePlus (ColorOS), Xiaomi, Vivo and Huawei/Honor phones freeze
+background apps even while they show a notification. Allow background activity, and set
+battery optimisation to "Don't optimise", for both **AnkiDroid MCP** and **AnkiDroid**. The
+Status tab names the setting for your phone.
+
+## What leaves your phone
+
+- Claude's MCP requests and the app's responses to them (for example your deck names and due
+  counts), through the AnkiMCP tunnel. AnkiMCP does not store deck data beyond the request in
+  flight.
+- Your AnkiMCP account token, to authenticate the tunnel connection.
+- An FCM registration token, sent to AnkiMCP so it can wake the phone. Sign out removes it.
+
+See the [AnkiMCP privacy policy](https://ankimcp.ai/privacy/).
+
+## Troubleshooting
+
+Open the **Log** tab and tap **Share log** (or **Copy**). The shared text has the app version,
+Android version, phone model and connection mode, but not your email, and anything that looks
+like a token is removed. Post it with a short description on
+[forum.ankimcp.ai](https://forum.ankimcp.ai/).
+
+## Building from source
 
 Needs JDK 17+ and an Android SDK with platform 36 (`sdk.dir` in `local.properties` or
 `ANDROID_HOME`).
@@ -28,26 +76,14 @@ Needs JDK 17+ and an Android SDK with platform 36 (`sdk.dir` in `local.propertie
 ./gradlew :app:assembleDebug          # app/build/outputs/apk/debug/app-debug.apk
 ./gradlew :app:testDebugUnitTest      # JVM unit tests
 ./gradlew :app:lintDebug              # Android lint
-./gradlew :app:assembleRelease        # minified, unsigned
+./gradlew :app:assembleRelease        # minified; unsigned without the signing variables (docs/RELEASING.md)
 ```
 
-### Firebase config (push wake-ups)
+`app/google-services.json` (Firebase) is optional and not in the repo. Without it the build
+prints `app/google-services.json not found: building without Firebase push`, the app shows
+"Push not configured in this build", and on demand works like a manual connection.
 
-`app/google-services.json` (Firebase project `ankimcp-e2d35`) is not in the repo and is
-gitignored. It is stored in Bitwarden; fetch it with the Bitwarden CLI (signed in and
-unlocked):
-
-```sh
-bw get notes "Firebase ankimcp-e2d35 google-services.json (AnkiDroid MCP)" > app/google-services.json
-```
-
-Without the file the build still works: Gradle prints
-`app/google-services.json not found: building without Firebase push`, the app shows
-"Push not configured in this build", and on-demand mode falls back to connecting manually.
-
-### Dev relay
-
-Point a debug build at another relay (e.g. a local tunnel on the emulator host):
+Point a debug build at another relay, e.g. a local one from the emulator:
 
 ```sh
 ./gradlew :app:assembleDebug -Pankimcp.tunnelUrl=ws://10.0.2.2:3004
@@ -56,57 +92,22 @@ Point a debug build at another relay (e.g. a local tunnel on the emulator host):
 Release builds always use `wss://tunnel.ankimcp.ai`. Cleartext `ws://` is only allowed to
 `10.0.2.2`, `localhost` and `127.0.0.1`.
 
-The app targets API 36 (Android 16), as Google Play requires; see docs/DECISIONS.md (D1).
+## Contributing / development
 
-## Use it
+CI (`.github/workflows/ci.yml`) runs unit tests, lint and a debug build on every push to `main`
+and every pull request, without `google-services.json`; the debug APK and the test and lint
+reports are attached to the run. Releases are tag-driven and signed in CI; see
+[docs/RELEASING.md](docs/RELEASING.md).
 
-1. Install the APK and open **AnkiDroid MCP**.
-2. Onboarding: confirm AnkiDroid is installed and grant access to its database. Optionally turn
-   off battery optimisation for the app so the connection survives Doze. On Oppo, Realme,
-   OnePlus, Xiaomi, Vivo and Huawei/Honor phones the system also freezes background apps; the
-   battery card names the maker's own setting to turn off (on ColorOS: "Allow background
-   activity").
-3. Sign in: tap **Sign in**, then **Open sign-in page**. Check that the page shows the same code,
-   approve, and the app continues automatically. On Android 13+ the app then asks to show
-   notifications; allow it, or you won't see when Claude wakes the phone.
-4. Pick a connection mode on the Status screen (see below). **Connect** opens the tunnel right
-   away; a persistent notification shows its status while it is open.
+## Links
 
-## Connection modes
+- [ankimcp.ai](https://ankimcp.ai), [dashboard](https://web.ankimcp.ai),
+  [forum](https://forum.ankimcp.ai/), [service status](https://status.ankimcp.ai/)
+- [docs/PROTOCOL.md](docs/PROTOCOL.md): tunnel protocol and push registration contract
+- [docs/DECISIONS.md](docs/DECISIONS.md): design decisions and known gaps
+- [docs/RELEASING.md](docs/RELEASING.md): versioning, releases, verifying an APK
 
-- **On demand** (default): when Claude makes a request and the phone is not connected, the
-  AnkiMCP server sends a push message, the app connects (the notification appears), answers,
-  and disconnects again after 15, 30 (default) or 60 minutes without requests, or as soon as
-  the screen turns off (or the phone freezes the app). Turning the screen back on does not
-  reconnect; Claude's next request wakes the phone again. Connecting by hand works the same
-  way. The Status screen shows whether push is registered and, while connected, when the idle
-  disconnect will happen. If push is not available (no Firebase config
-  in the build, or the phone's current push token is not registered with the server), on demand
-  behaves like a manual connection that stays open until you tap **Disconnect**.
-- **Always connected**: the previous "Keep connected" behaviour. The app connects on launch and
-  after a reboot, never disconnects when idle, and keeps retrying every 30 seconds if the
-  connection keeps failing. **Disconnect** (in the app or the notification) switches back to on
-  demand.
+## Licence
 
-If your session expires while the phone is asleep, a wake-up shows a "Sign in again to
-AnkiMCP" notification instead of connecting. **Sign out** removes the phone's push
-registration from the server first.
-
-## Connect Claude
-
-1. In claude.ai, open **Settings > Connectors > Add custom connector**.
-2. Enter the URL shown on the app's Status screen: `https://tunnel.ankimcp.ai/mcp`
-   (there's a Copy button).
-3. Complete the AnkiMCP sign-in when Claude asks, using the same account as the app.
-4. Ask Claude "list my Anki decks". In on-demand mode the first request may take a few seconds
-   longer while the phone wakes up and connects.
-
-If the desktop add-on or CLI is connected with the same account, whichever connected last wins
-(the other one is closed with "Connected from another device").
-
-## Docs
-
-- [docs/PROTOCOL.md](docs/PROTOCOL.md): wire protocol as implemented, how it differs from the
-  add-on, and the push registration contract.
-- [docs/DECISIONS.md](docs/DECISIONS.md): design decisions and known gaps.
-- [NOTICE](NOTICE): third-party notices (vendored `FlashCardsContract.kt`).
+[AGPL-3.0](LICENSE). `FlashCardsContract.kt` is vendored from AnkiDroid under its own
+all-permissive notice, and the runtime libraries are Apache-2.0; see [NOTICE](NOTICE).

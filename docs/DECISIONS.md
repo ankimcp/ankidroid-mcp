@@ -1,7 +1,8 @@
 # Decisions
 
 Decisions made while building phase 1, the push wake-up feature after it (D31-D39), and the
-fixes after the first on-device trial (D40-D44), without a chance to ask. Each one is cheap to
+fixes after the first on-device trial (D40-D44), and the branding and UI round (D45-D48),
+without a chance to ask. Each one is cheap to
 revisit.
 
 ## Target SDK
@@ -564,6 +565,72 @@ gets frozen too.
   sign-in with an error instead of opening the browser. A dev relay on `http://` still works
   for the WebSocket and token calls, but its verification URL must be https to be opened.
 
+## Branding and UI
+
+- **D45. The launcher icon is the ankimcp.ai favicon owl.** The paths of
+  `ankimcp.ai/static/favicon.svg` (120-unit viewBox: heart-shaped face `#f0e4c5` with a 3-unit
+  `#d4a84a` stroke, `#1a2550` eyes, gold beak) are copied unchanged into
+  `drawable/ic_launcher_foreground.xml` inside a group scaled 0.66 and centred, which keeps the
+  whole face (stroke included) inside the 66 dp safe circle of the 108 dp adaptive canvas; the
+  site's navy tile becomes the `#1A2550` background layer. `ic_launcher_monochrome.xml` is the
+  same face as one even-odd shape with eyes and beak cut out, for Android 13 themed icons. The
+  notification small icon (`ic_stat_tunnel`) is that silhouette in white, fitted into 20 of
+  24 dp. No PNG fallbacks: minSdk is 26, so the adaptive icon in `mipmap-anydpi-v26` covers
+  every device. The site's hexagonal `logo.svg` was not used: the owl is what users already see
+  in the browser tab, and it survives circular masks better. The navigation and button icons
+  are Material icon paths (Apache 2.0) vendored as vector drawables, since
+  `material-icons-core` is not a dependency and Material3 1.4 no longer pulls it in.
+- **D46. Fixed brand colours, dynamic colour off.** Material You would recolour the app per
+  wallpaper; the brand should look the same everywhere. Ratios are WCAG 2.x, checked with the
+  standard relative-luminance formula:
+  - Light: primary is navy `#1A2550` (white on it 14.7:1; navy on the cream card 12.4:1), not
+    the site blue `#0A72E6`: white on that blue is only 4.6:1 and the blue as text on cream is
+    3.6:1, which fails AA. The site blue, darkened to `#0A5BB8`, is the secondary colour (5.2:1
+    on cream, white on it 6.6:1). Gold `#D4A84A` is the tertiary container with navy on it
+    (6.7:1); as text it is darkened to `#6B4E0E` (6.1:1 on cream). Background `#FBF8F0`, cards
+    `#F3EBD6` and surface variant `#F0E4C5` are tints of the owl cream; text is the site's
+    `#1E293B`, secondary text `#334155` (8.2:1 on the darkest cream).
+  - Dark: surfaces start at the site's `#152136` and step up to `#26344F` for cards; primary is
+    a light blue `#9EC2FF` (6.9:1 on cards), tertiary is the gold itself (5.6:1 on cards), text
+    `#E3E7EF` (10:1).
+  - Status colours (`StatusColors`, provided next to the colour scheme): connected
+    `#1B6E2A`/`#7BD88F`, warning `#8A5300`/`#FFB95C`, error from the scheme (`#BA1A1A`/
+    `#FFB4AB`); each is at least 5:1 on the card colour of its theme. The previous connected green
+    `#2E7D32` would have been 4.3:1 on the cream cards.
+  The XML window theme is unchanged (`Theme.Material.Light.NoActionBar`), so dark mode can show
+  a light window for a frame before Compose draws.
+- **D47. Three bottom-navigation destinations once signed in: Status, Log, About.** Material's
+  navigation bar is the component for 3-5 top-level destinations; tabs are for related views
+  inside one screen. The selected destination is a `rememberSaveable` enum in `AppRoot`, not
+  Navigation Compose: three flat screens with no back stack do not need the dependency. Back
+  from Log or About returns to Status (a `BackHandler`; Android's "Principles of navigation":
+  the start destination is the last screen the user sees before leaving); Back on Status
+  leaves the app. The selection resets to Status when the user is
+  signed out or AnkiDroid is no longer ready, but not while credentials are still loading, so a
+  tab restored after process death survives. Onboarding and sign-in keep the old single
+  screen without the bar. Status keeps the account card (with Sign out), the tunnel card
+  (state dot and text, Connect/Disconnect, the MCP URL in a field with a "Copy URL" button), the
+  connection card, notifications and the battery card in the D42 positions. Copy feedback
+  follows the platform guidance (developer.android.com, "Copy and paste": Android 13+ shows its
+  own confirmation, apps should not add a toast or snackbar there): on Android 12L and lower a
+  snackbar confirms the copy; on 13+ the button reads "Copied" for 2 s next to the system's
+  confirmation. Never both.
+- **D48. Shared logs carry device facts, no account data, and are redacted.** "Share log"
+  sends `ACTION_SEND` `text/plain` through a chooser, "Copy log" puts the same text on the
+  clipboard. `log/LogReport` builds it: app version, Android release and API level,
+  `Build.MANUFACTURER`/`MODEL`, connection mode, "Push wake-ups registered: yes/no" (the
+  current FCM token is registered; never the token), then the entries oldest first with a
+  full date and the UTC offset. The email is never in the header, and the signed-in email
+  (and the user id when it is 8+ characters) is removed verbatim if a message contains it.
+  Then, although the log should hold no secrets (CLAUDE.md), regexes remove `Bearer` values,
+  `token=`/`access_token:`-style values of 8+ characters or with a digit (so "Invalid token:
+  expired" stays), JWT-shaped strings (three dot-separated base64url parts of 10+ characters),
+  FCM tokens (`<id>:APA91...`), email addresses, standard base64 runs (with `+`, `/`, `=`) of
+  32+ characters that mix upper case, lower case and digits, and base64url runs of 32+
+  characters that contain a digit. The digit and case requirements keep exception class names
+  and lower-case URL paths readable. The UI log list itself is unchanged (newest first,
+  unredacted), since it only shows what is already on the phone.
+
 ## Not done
 
 - On-device verification: no emulator or device was available when this was built. This
@@ -576,6 +643,8 @@ gets frozen too.
 - D40-D44 are unit-tested only; not yet re-run on the Realme trial phone, and push wake-ups
   are not yet enabled server side, so the on-demand "next request wakes it" path is untested
   end to end.
-- Placeholder launcher icon; no Play listing assets, privacy policy or data-safety form (the
+- D45-D48 were built and unit-tested without running on a device; the icon and colours have
+  not been checked on a launcher or in dark mode yet.
+- No Play listing assets, privacy policy or data-safety form (the
   data-safety form will need to declare the FCM token, see D39).
 - The relay's `ClientTypeSchema` does not know `ankidroid` yet (harmless, see PROTOCOL.md).
