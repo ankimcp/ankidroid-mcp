@@ -3,6 +3,7 @@ package ai.ankimcp.ankidroid.ui
 import ai.ankimcp.ankidroid.auth.UserInfo
 import ai.ankimcp.ankidroid.log.LogEntry
 import ai.ankimcp.ankidroid.push.PushRegistrationState
+import ai.ankimcp.ankidroid.service.FreezingOem
 import ai.ankimcp.ankidroid.service.TunnelForegroundService
 import ai.ankimcp.ankidroid.settings.ConnectionMode
 import ai.ankimcp.ankidroid.settings.IdleWindow
@@ -55,13 +56,35 @@ data class ConnectionUi(
     val idleDisconnectAt: Long?,
 )
 
+/** Battery exemption state for the Status screen. */
+data class BatteryUi(
+    val unrestricted: Boolean,
+    /** Non-null on makers whose skins freeze background apps. */
+    val oem: FreezingOem?,
+    val freezeDetected: Boolean,
+) {
+    enum class Placement { Hidden, Top, Bottom }
+
+    /**
+     * Right below the tunnel card when the phone already froze the connection, or on a freezing
+     * maker while the exemption is missing. On those makers it stays (lower down) after the
+     * exemption is granted, since their own switches can't be read.
+     */
+    val placement: Placement
+        get() = when {
+            freezeDetected || (oem != null && !unrestricted) -> Placement.Top
+            !unrestricted || oem != null -> Placement.Bottom
+            else -> Placement.Hidden
+        }
+}
+
 @Composable
 fun StatusScreen(
     user: UserInfo,
     tunnelState: TunnelState,
     defaultMcpUrl: String,
     connection: ConnectionUi,
-    batteryUnrestricted: Boolean,
+    battery: BatteryUi,
     /** False when the permission, the app's notification switch or one of its channels is off. */
     notificationsShown: Boolean,
     logEntries: List<LogEntry>,
@@ -70,6 +93,7 @@ fun StatusScreen(
     onDisconnect: () -> Unit,
     onModeChange: (ConnectionMode) -> Unit,
     onIdleWindowChange: (IdleWindow) -> Unit,
+    onDismissFreezeNotice: () -> Unit,
     onLogout: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -104,7 +128,8 @@ fun StatusScreen(
                         TunnelForegroundService.describe(tunnelState),
                         color = when {
                             tunnelState is TunnelState.Connected -> Color(0xFF2E7D32)
-                            tunnelState is TunnelState.Stopped && !tunnelState.idleTimeout -> MaterialTheme.colorScheme.error
+                            tunnelState is TunnelState.Stopped && !tunnelState.idleTimeout && !tunnelState.phoneAsleep ->
+                                MaterialTheme.colorScheme.error
                             else -> MaterialTheme.colorScheme.onSurface
                         },
                     )
@@ -113,8 +138,8 @@ fun StatusScreen(
                     }
                     if (running && connection.idleDisconnectAt != null) {
                         Text(
-                            "Disconnects at ${shortTimeFormat.format(Date(connection.idleDisconnectAt))} " +
-                                "unless Claude sends a request",
+                            "Disconnects when the screen turns off, or at " +
+                                "${shortTimeFormat.format(Date(connection.idleDisconnectAt))} unless Claude sends a request",
                             style = MaterialTheme.typography.bodySmall,
                         )
                     }
@@ -136,6 +161,10 @@ fun StatusScreen(
             }
         }
 
+        if (battery.placement == BatteryUi.Placement.Top) {
+            item { BatteryCard(battery.unrestricted, battery.oem, battery.freezeDetected, onDismissFreezeNotice) }
+        }
+
         item {
             ConnectionModeCard(
                 connection = connection,
@@ -147,8 +176,8 @@ fun StatusScreen(
 
         item { NotificationsCard(granted = notificationsShown) }
 
-        if (!batteryUnrestricted) {
-            item { BatteryCard(unrestricted = false) }
+        if (battery.placement == BatteryUi.Placement.Bottom) {
+            item { BatteryCard(battery.unrestricted, battery.oem, battery.freezeDetected, onDismissFreezeNotice) }
         }
 
         item {
@@ -195,8 +224,9 @@ private fun ConnectionModeCard(
                 selected = onDemand,
                 title = "On demand",
                 description = if (connection.wakeUpsReady) {
-                    "Claude wakes the phone when it needs your decks. Disconnects after " +
-                        "${connection.idleWindow.minutes} min without requests."
+                    "Claude wakes the phone when it needs your decks. Disconnects when the screen turns " +
+                        "off or after ${connection.idleWindow.minutes} min without requests, and does not " +
+                        "reconnect when you turn the screen on: Claude's next request wakes it again."
                 } else {
                     "Push wake-ups are not available, so this works like a manual connection: tap " +
                         "Connect, and it stays open until you disconnect."

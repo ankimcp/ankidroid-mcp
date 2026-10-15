@@ -51,10 +51,11 @@ class ListDecksToolTest {
         timeoutMs: Long = 5_000,
         maxThreads: Int = AnkiDroidRepository.MAX_PROVIDER_THREADS,
         queueCapacity: Int = AnkiDroidRepository.PROVIDER_QUEUE_CAPACITY,
+        nullRetryDelaysMs: List<Long> = listOf(1L, 1L),
         provider: () -> List<DeckRow>?,
     ): AnkiDroidRepository {
         val executor = AnkiDroidRepository.newProviderExecutor(maxThreads, queueCapacity).also { executors += it }
-        return AnkiDroidRepository(FakeProvider(provider), availability, executor, timeoutMs)
+        return AnkiDroidRepository(FakeProvider(provider), availability, executor, timeoutMs, nullRetryDelaysMs)
     }
 
     private fun tool(
@@ -164,9 +165,43 @@ class ListDecksToolTest {
     }
 
     @Test
-    fun `null cursor is a tool error`() {
-        val text = errorText(tool { null })
+    fun `null cursor every time is a tool error after three attempts`() {
+        val calls = AtomicInteger()
+        val text = errorText(
+            tool {
+                calls.incrementAndGet()
+                null
+            },
+        )
+        assertEquals(3, calls.get())
         assertTrue(text, text.contains("did not answer"))
+        assertTrue(text, text.contains("put it to sleep"))
+        assertTrue(text, text.contains("open AnkiDroid once"))
+    }
+
+    @Test
+    fun `null cursor from a frozen AnkiDroid is retried until data arrives`() = runBlocking {
+        val calls = AtomicInteger()
+        val repo = repository {
+            if (calls.incrementAndGet() < 3) null else listOf(DeckRow(1, "Default", "[0,0,0]", "false"))
+        }
+
+        val result = repo.listDecks()
+
+        assertEquals(3, calls.get())
+        assertEquals(1, (result as AnkiResult.Success).value.size)
+    }
+
+    @Test
+    fun `null cursor retries stay inside the timeout budget`() = runBlocking {
+        val calls = AtomicInteger()
+        val repo = repository(timeoutMs = 300, nullRetryDelaysMs = listOf(200L, 200L)) {
+            calls.incrementAndGet()
+            null
+        }
+
+        assertEquals(AnkiResult.NotResponding(300), repo.listDecks())
+        assertEquals(2, calls.get())
     }
 
     @Test

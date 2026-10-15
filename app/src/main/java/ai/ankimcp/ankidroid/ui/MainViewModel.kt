@@ -5,6 +5,7 @@ import ai.ankimcp.ankidroid.appGraph
 import ai.ankimcp.ankidroid.auth.AuthException
 import ai.ankimcp.ankidroid.auth.DeviceFlowClient
 import ai.ankimcp.ankidroid.push.PushRegistrationState
+import ai.ankimcp.ankidroid.service.FreezingOem
 import ai.ankimcp.ankidroid.service.TunnelForegroundService
 import ai.ankimcp.ankidroid.service.allNotificationsShown
 import ai.ankimcp.ankidroid.service.hasNotificationPermission
@@ -107,8 +108,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private var signInJob: Job? = null
 
+    /** The phone froze a running tunnel; cleared once battery optimisation is turned off. */
+    val freezeDetected: StateFlow<Boolean> = graph.freezeNotice.detected
+
+    /** Non-null on makers whose skins freeze background apps (D42). */
+    val freezingOem: FreezingOem? = FreezingOem.current()
+
     fun refreshEnvironment() {
-        _environment.value = readEnvironment()
+        val previous = _environment.value
+        val current = readEnvironment()
+        _environment.value = current
+        graph.freezeNotice.onBatteryExemption(previous.batteryUnrestricted, current.batteryUnrestricted)
+    }
+
+    fun dismissFreezeNotice() {
+        graph.freezeNotice.dismiss()
     }
 
     fun startSignIn() {

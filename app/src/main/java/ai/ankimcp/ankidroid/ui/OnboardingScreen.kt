@@ -1,5 +1,6 @@
 package ai.ankimcp.ankidroid.ui
 
+import ai.ankimcp.ankidroid.service.FreezingOem
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
@@ -9,6 +10,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
@@ -18,11 +20,13 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -81,22 +85,58 @@ fun OnboardingScreen(
             }
         }
 
-        BatteryCard(environment.batteryUnrestricted)
+        BatteryCard(environment.batteryUnrestricted, oem = FreezingOem.current(), freezeDetected = false, onDismissFreeze = {})
     }
 }
 
+/**
+ * Optional battery exemption. On makers whose skins freeze background apps ([oem]) it also names
+ * the maker's own switches, which the system exemption does not cover; [freezeDetected] adds a
+ * note that this already happened.
+ */
 @Composable
-fun BatteryCard(unrestricted: Boolean, modifier: Modifier = Modifier) {
+fun BatteryCard(
+    unrestricted: Boolean,
+    oem: FreezingOem?,
+    freezeDetected: Boolean,
+    onDismissFreeze: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
     val context = LocalContext.current
-    StepCard(
-        title = "Optional: battery",
-        done = unrestricted,
-        doneText = "Battery optimisation is off for this app, so the connection survives Doze.",
-        todoText = "Android may cut the connection when the phone is idle. To keep it alive, find " +
-            "AnkiDroid MCP in the list and choose \"Don't optimise\" (or \"Unrestricted\").",
-        modifier = modifier,
-    ) {
-        OutlinedButton(onClick = { openBatterySettings(context) }) { Text("Open battery settings") }
+    Card(modifier = modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Optional: battery", style = MaterialTheme.typography.titleMedium)
+            if (freezeDetected) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "Your phone froze the connection in the background",
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.weight(1f),
+                    )
+                    TextButton(onClick = onDismissFreeze) { Text("Dismiss") }
+                }
+            }
+            if (unrestricted) {
+                Text("✓ Battery optimisation is off for this app.")
+            } else {
+                Text(
+                    if (oem != null) {
+                        "This phone may pause the connection soon after the screen turns off, even while " +
+                            "Claude is using it. Allow the app to run in the background to keep it alive."
+                    } else {
+                        "Android may cut the connection when the phone is idle. To keep it alive, find " +
+                            "AnkiDroid MCP in the list and choose \"Don't optimise\" (or \"Unrestricted\")."
+                    },
+                )
+            }
+            if (oem != null) Text(oem.instructions, style = MaterialTheme.typography.bodySmall)
+            when {
+                // The maker's switches live on the app's own page; there is no public intent for its battery sub-page.
+                oem != null -> OutlinedButton(onClick = { openAppSettings(context) }) { Text("Open app info") }
+                !unrestricted -> OutlinedButton(onClick = { openBatterySettings(context) }) { Text("Open battery settings") }
+                freezeDetected -> OutlinedButton(onClick = { openAppSettings(context) }) { Text("Open app info") }
+            }
+        }
     }
 }
 
@@ -151,7 +191,7 @@ private fun openAppSettings(context: Context) {
     }
 }
 
-/** Opens the system list; we deliberately do not use REQUEST_IGNORE_BATTERY_OPTIMIZATIONS (Play policy). */
+/** The system list; no direct exemption request (docs/DECISIONS.md D42). */
 private fun openBatterySettings(context: Context) {
     try {
         context.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
