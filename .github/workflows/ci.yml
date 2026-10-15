@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # Prints version.properties so a version that drifted from the last tag is visible in
+      # the log. Same script the release workflow uses to gate tags.
+      - name: Resolve version
+        run: |
+          python3 .github/scripts/resolve_version.py --self-test
+          python3 .github/scripts/resolve_version.py
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # 'basic' is the open-source provider on top of actions/cache; the default 'enhanced'
+      # provider is a separately licensed library. Cache writes happen on main only (the
+      # action's default), PRs read.
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-provider: basic
+
+      # No app/google-services.json in CI: app/build.gradle.kts skips the google-services
+      # plugin when the file is missing, so this is the "push not configured" build.
+      - name: Test, lint, assemble
+        run: ./gradlew :app:testDebugUnitTest :app:lintDebug :app:assembleDebug --no-daemon
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: unit-test-results
+          path: app/build/test-results/testDebugUnitTest/
+          if-no-files-found: ignore
+
+      - name: Upload lint reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: lint-reports
+          path: |
+            app/build/reports/lint-results-debug.html
+            app/build/reports/lint-results-debug.xml
+          if-no-files-found: ignore
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: app-debug
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error

@@ -1,0 +1,43 @@
+version: 2
+updates:
+  - package-ecosystem: gradle
+    directory: /
+    schedule:
+      interval: weekly
+    # Several small groups, so one bad bump does not hold back the rest. Anything not
+    # matched (OkHttp, JUnit, plugins, wrapper) gets its own PR.
+    groups:
+      androidx:
+        patterns: ['androidx.*']
+      kotlinx:
+        patterns: ['org.jetbrains.kotlinx*']
+      firebase:
+        patterns: ['com.google.firebase*', 'com.google.gms*']
+    # Pins capped on purpose (docs/DECISIONS.md D2-D4): these need AGP 9 / compileSdk 37 or
+    # are deliberate version choices. Lift an entry when that migration happens.
+    ignore:
+      # Kotlin itself (plugins and stdlib), not kotlinx libraries.
+      - dependency-name: 'org.jetbrains.kotlin.*'
+        update-types: ['version-update:semver-minor', 'version-update:semver-major']
+      - dependency-name: 'org.jetbrains.kotlin:*'
+        update-types: ['version-update:semver-minor', 'version-update:semver-major']
+      - dependency-name: com.android.application
+        update-types: ['version-update:semver-major']
+      - dependency-name: gradle-wrapper
+        update-types: ['version-update:semver-major']
+      - dependency-name: androidx.core:core-ktx
+        versions: ['>=1.19.0']
+      - dependency-name: 'androidx.lifecycle:*'
+        versions: ['>=2.11.0']
+      - dependency-name: androidx.compose:compose-bom
+        versions: ['>=2026.08.00']
+      - dependency-name: 'com.squareup.okhttp3:*'
+        update-types: ['version-update:semver-major']
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns: ['*']

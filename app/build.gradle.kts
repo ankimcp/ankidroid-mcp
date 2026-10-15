@@ -1,3 +1,5 @@
+import java.io.StringReader
+import java.util.Properties
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
@@ -15,6 +17,42 @@ if (file("google-services.json").exists()) {
     logger.lifecycle("app/google-services.json not found: building without Firebase push")
 }
 
+// version.properties is the single source of truth for the version (docs/RELEASING.md).
+// versionCode is derived from it so rebuilding a tag always gives the same code.
+val appVersionName: String =
+    Properties()
+        .apply {
+            load(
+                StringReader(
+                    providers.fileContents(rootProject.layout.projectDirectory.file("version.properties"))
+                        .asText.get(),
+                ),
+            )
+        }
+        .getProperty("versionName")
+        ?: error("version.properties has no versionName")
+val appVersionCode: Int = run {
+    // Same shape as SHAPE_RE in .github/scripts/resolve_version.py.
+    val match = Regex("""(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)""").matchEntire(appVersionName)
+        ?: error("versionName '$appVersionName' must be MAJOR.MINOR.PATCH")
+    val (major, minor, patch) = match.destructured.toList().map(String::toInt)
+    require(minor <= 99 && patch <= 99) { "minor and patch must be <= 99 for versionCode" }
+    major * 10_000 + minor * 100 + patch
+}
+
+// Release signing comes from the environment (CI secrets, docs/RELEASING.md). Without all four
+// variables the release build stays unsigned, as before.
+val releaseSigningEnv: Map<String, String>? = listOf(
+    "ANKIMCP_KEYSTORE_PATH",
+    "ANKIMCP_KEYSTORE_PASSWORD",
+    "ANKIMCP_KEY_ALIAS",
+    "ANKIMCP_KEY_PASSWORD",
+).associateWith { providers.environmentVariable(it).orNull.orEmpty() }
+    .takeIf { env -> env.values.all { it.isNotEmpty() } }
+if (releaseSigningEnv == null) {
+    logger.lifecycle("ANKIMCP_KEYSTORE_* / ANKIMCP_KEY_* not all set: release build is unsigned")
+}
+
 val defaultTunnelUrl = "wss://tunnel.ankimcp.ai"
 val devTunnelUrl: String =
     providers.gradleProperty("ankimcp.tunnelUrl").orElse(defaultTunnelUrl).get()
@@ -27,8 +65,19 @@ android {
         applicationId = "ai.ankimcp.ankidroid"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = appVersionCode
+        versionName = appVersionName
+    }
+
+    signingConfigs {
+        if (releaseSigningEnv != null) {
+            create("release") {
+                storeFile = file(releaseSigningEnv.getValue("ANKIMCP_KEYSTORE_PATH"))
+                storePassword = releaseSigningEnv.getValue("ANKIMCP_KEYSTORE_PASSWORD")
+                keyAlias = releaseSigningEnv.getValue("ANKIMCP_KEY_ALIAS")
+                keyPassword = releaseSigningEnv.getValue("ANKIMCP_KEY_PASSWORD")
+            }
+        }
     }
 
     buildTypes {
@@ -37,6 +86,9 @@ android {
         }
         release {
             buildConfigField("String", "TUNNEL_URL", "\"$defaultTunnelUrl\"")
+            if (releaseSigningEnv != null) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(
