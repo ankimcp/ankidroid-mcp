@@ -94,6 +94,10 @@ class TunnelClient(
     private val wakeLocks: WakeLocks = WakeLocks.None,
     private val onEstablished: (url: String) -> Unit = {},
     private val onRequest: () -> Unit = {},
+    /** Called once per `request` frame after its response was flushed (or the request was cancelled). */
+    private val onRequestDone: () -> Unit = {},
+    /** Bytes still queued for sending (`WebSocket.queueSize()`); a seam for tests. */
+    private val queueSize: (WebSocket) -> Long = { it.queueSize() },
     private val onServerError: (code: String, message: String) -> Unit = { _, _ -> },
     private val openTimeoutMs: Long = ProtocolConstants.OPEN_TIMEOUT_MS,
     private val handshakeTimeoutMs: Long = ProtocolConstants.CONNECTION_TIMEOUT_MS,
@@ -295,11 +299,13 @@ class TunnelClient(
                             // Taken before the coroutine is dispatched so the CPU cannot suspend in between.
                             val wakeLock = wakeLocks.acquire("request", requestTimeoutMs + WAKE_LOCK_SLACK_MS)
                             requestsInFlight.update { it + 1 }
-                            // Released on completion, which also covers a request cancelled before it ran.
+                            // Released on completion (after the response is flushed, see handleRequest), which
+                            // also covers a request cancelled before it ran.
                             requestScope.launch { handleRequest(ws, message) }
                                 .invokeOnCompletion {
                                     wakeLock.close()
                                     requestsInFlight.update { it - 1 }
+                                    onRequestDone()
                                 }
                         }
                         is ServerMessage.Ping -> {
@@ -377,6 +383,13 @@ class TunnelClient(
         }
         if (!ws.send(Protocol.encode(response))) {
             log.warn("Could not send response for ${request.requestId}: socket closed")
+        } else {
+            // send() only queues the frame for OkHttp's writer thread. Keep the request wake lock
+            // until it has been written: OEM freezers stop the process as soon as the last wake
+            // lock is released, which would strand the response in the queue (D49).
+            withTimeoutOrNull(FLUSH_TIMEOUT_MS) {
+                while (queueSize(ws) > 0) delay(FLUSH_POLL_MS)
+            }
         }
         log.debug("${request.method} ${request.path} -> ${response.statusCode} (${clock.elapsedMs() - start} ms)")
     }
@@ -408,6 +421,10 @@ class TunnelClient(
 
         /** Extra wake-lock time on top of the request budget for sending the response. */
         private const val WAKE_LOCK_SLACK_MS = 5_000L
+
+        /** Upper bound on waiting for a response frame to leave OkHttp's queue. */
+        const val FLUSH_TIMEOUT_MS = 2_000L
+        private const val FLUSH_POLL_MS = 20L
 
         /** How late a watchdog check may run on uptime before it counts as a freeze. */
         const val FROZEN_SLACK_MS = 10_000L

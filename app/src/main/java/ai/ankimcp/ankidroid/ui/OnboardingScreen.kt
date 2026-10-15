@@ -1,5 +1,6 @@
 package ai.ankimcp.ankidroid.ui
 
+import ai.ankimcp.ankidroid.anki.AnkiDroidAvailability
 import ai.ankimcp.ankidroid.service.FreezingOem
 import android.content.ActivityNotFoundException
 import android.content.Context
@@ -123,8 +124,9 @@ fun BatteryCard(
             } else {
                 Text(
                     if (oem != null) {
-                        "This phone may pause the connection soon after the screen turns off, even while " +
-                            "Claude is using it. Allow the app to run in the background to keep it alive."
+                        "This phone pauses background apps soon after the screen turns off, even while " +
+                            "Claude is using them. Both AnkiDroid MCP and AnkiDroid must be allowed to run " +
+                            "in the background, or Claude's requests time out."
                     } else {
                         "Android may cut the connection when the phone is idle. To keep it alive, find " +
                             "AnkiDroid MCP in the list and choose \"Don't optimise\" (or \"Unrestricted\")."
@@ -133,8 +135,13 @@ fun BatteryCard(
             }
             if (oem != null) SupportingText(oem.instructions)
             when {
-                // The maker's switches live on the app's own page; there is no public intent for its battery sub-page.
-                oem != null -> OutlinedButton(onClick = { openAppSettings(context) }) { Text("Open app info") }
+                // The maker's switches live on each app's own page; there is no public intent for its battery sub-page.
+                oem != null -> Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = { openAppSettings(context) }) { Text("AnkiDroid MCP info") }
+                    OutlinedButton(onClick = { openAppSettings(context, AnkiDroidAvailability.PACKAGE_NAME) }) {
+                        Text("AnkiDroid info")
+                    }
+                }
                 !unrestricted -> OutlinedButton(onClick = { openBatterySettings(context) }) { Text("Open battery settings") }
                 freezeDetected -> OutlinedButton(onClick = { openAppSettings(context) }) { Text("Open app info") }
             }
@@ -185,10 +192,10 @@ private fun openPlayStore(context: Context, packageName: String) {
     }
 }
 
-private fun openAppSettings(context: Context) {
+private fun openAppSettings(context: Context, packageName: String = context.packageName) {
     runCatching {
         context.startActivity(
-            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", context.packageName, null)),
+            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", packageName, null)),
         )
     }
 }

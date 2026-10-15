@@ -71,6 +71,7 @@ class TunnelConnectionTest {
         private val step: Step,
         private val onEstablished: (String) -> Unit,
         private val onRequest: () -> Unit,
+        private val onRequestDone: () -> Unit,
         private val health: (FakeSession) -> Boolean,
     ) : TunnelSession {
         private val hang = CompletableDeferred<CloseResult>()
@@ -84,6 +85,9 @@ class TunnelConnectionTest {
 
         /** Simulates a `request` frame arriving from the relay. */
         fun request() = onRequest()
+
+        /** Simulates that request's response being flushed to the relay. */
+        fun requestDone() = onRequestDone()
 
         override suspend fun awaitRequestsIdle() {
             requestsIdle.first { it }
@@ -137,10 +141,15 @@ class TunnelConnectionTest {
         val usedTokens = CopyOnWriteArrayList<String>()
         val sessions = CopyOnWriteArrayList<FakeSession>()
 
-        override fun create(credentials: Credentials, onEstablished: (String) -> Unit, onRequest: () -> Unit): TunnelSession {
+        override fun create(
+            credentials: Credentials,
+            onEstablished: (String) -> Unit,
+            onRequest: () -> Unit,
+            onRequestDone: () -> Unit,
+        ): TunnelSession {
             usedTokens += credentials.accessToken
             val step = remaining.removeFirstOrNull() ?: Step.Fail()
-            return FakeSession(step, onEstablished, onRequest, health).also { sessions += it }
+            return FakeSession(step, onEstablished, onRequest, onRequestDone, health).also { sessions += it }
         }
     }
 
@@ -200,6 +209,7 @@ class TunnelConnectionTest {
         factory: TunnelSessionFactory,
         network: StateFlow<Boolean> = MutableStateFlow(true),
         keepRetrying: Boolean = false,
+        keepRetryingProvider: () -> Boolean = { keepRetrying },
         policy: ReconnectPolicy = ReconnectPolicy(random = Random(0)),
         wakeLocks: WakeLocks = WakeLocks.None,
         wakeups: WakeupScheduler = WakeupScheduler.None,
@@ -223,7 +233,7 @@ class TunnelConnectionTest {
             policy = policy,
             networkAvailable = network,
             log = log,
-            keepRetrying = { keepRetrying },
+            keepRetrying = keepRetryingProvider,
             wakeLocks = wakeLocks,
             wakeups = wakeups,
             idleTimeoutMs = idleTimeoutMs,
@@ -1338,6 +1348,306 @@ class TunnelConnectionTest {
         assertTrue(tunnel.state.value is TunnelState.Connected)
         assertTrue(reports.isEmpty())
         tunnel.stop()
+    }
+
+    private fun RecordingWakeLocks.holds(tag: String) = acquired.count { it == tag } > released.count { it == tag }
+
+    private fun TestScope.wokenConnection(
+        factory: ScriptedFactory,
+        wakeLocks: RecordingWakeLocks,
+        keepRetrying: Boolean = false,
+        screenOn: () -> Boolean = { false },
+        idleTimeoutMs: Long = IDLE_MS,
+    ) = connection(
+        InMemoryStore(credentials),
+        factory,
+        keepRetrying = keepRetrying,
+        wakeLocks = wakeLocks,
+        idleTimeoutMs = { idleTimeoutMs },
+        isScreenOn = screenOn,
+    )
+
+    @Test
+    fun `a screen-off wake holds the wake window until 60 s after the last response`() = runTest {
+        val wakeLocks = RecordingWakeLocks()
+        val factory = ScriptedFactory(listOf(Step.EstablishThenHang))
+        val tunnel = wokenConnection(factory, wakeLocks)
+
+        tunnel.start(wokenByPush = true)
+        runCurrent()
+        assertTrue(wakeLocks.holds("wake-window"))
+
+        val session = factory.sessions.single()
+        session.request()
+        advanceTimeBy(20_000)
+        session.requestDone()
+        advanceTimeBy(TunnelConnection.WAKE_WINDOW_GRACE_MS - 1)
+        runCurrent()
+        assertTrue("held for the grace after the response", wakeLocks.holds("wake-window"))
+
+        advanceTimeBy(1)
+        runCurrent()
+        assertFalse(wakeLocks.holds("wake-window"))
+        assertTrue("only the lock ends, not the session", tunnel.state.value is TunnelState.Connected)
+        tunnel.stop()
+    }
+
+    @Test
+    fun `the wake window stays open while a response is still being produced`() = runTest {
+        val wakeLocks = RecordingWakeLocks()
+        val factory = ScriptedFactory(listOf(Step.EstablishThenHang))
+        val tunnel = wokenConnection(factory, wakeLocks)
+        tunnel.start(wokenByPush = true)
+        runCurrent()
+        val session = factory.sessions.single()
+
+        session.request()
+        advanceTimeBy(3 * TunnelConnection.WAKE_WINDOW_GRACE_MS)
+        runCurrent()
+        assertTrue(wakeLocks.holds("wake-window"))
+
+        session.requestDone()
+        advanceTimeBy(TunnelConnection.WAKE_WINDOW_GRACE_MS)
+        runCurrent()
+        assertFalse(wakeLocks.holds("wake-window"))
+        tunnel.stop()
+    }
+
+    @Test
+    fun `a second request extends the wake window`() = runTest {
+        val wakeLocks = RecordingWakeLocks()
+        val factory = ScriptedFactory(listOf(Step.EstablishThenHang))
+        val tunnel = wokenConnection(factory, wakeLocks)
+        tunnel.start(wokenByPush = true)
+        runCurrent()
+        val session = factory.sessions.single()
+
+        session.request()
+        session.requestDone()
+        advanceTimeBy(50_000)
+        session.request()
+        session.requestDone()
+        advanceTimeBy(50_000)
+        runCurrent()
+        assertTrue("100 s after the first response, 50 s after the second", wakeLocks.holds("wake-window"))
+
+        advanceTimeBy(10_000)
+        runCurrent()
+        assertFalse(wakeLocks.holds("wake-window"))
+        tunnel.stop()
+    }
+
+    @Test
+    fun `a wake with no request lets the window go after the grace`() = runTest {
+        val wakeLocks = RecordingWakeLocks()
+        val tunnel = wokenConnection(ScriptedFactory(listOf(Step.EstablishThenHang)), wakeLocks)
+        tunnel.start(wokenByPush = true)
+        runCurrent()
+
+        advanceTimeBy(TunnelConnection.WAKE_WINDOW_GRACE_MS)
+        runCurrent()
+
+        assertFalse(wakeLocks.holds("wake-window"))
+        tunnel.stop()
+    }
+
+    @Test
+    fun `the wake window cap counts from the last request`() = runTest {
+        val wakeLocks = RecordingWakeLocks()
+        val timeouts = mutableListOf<Long>()
+        val recording = WakeLocks { tag, timeoutMs ->
+            if (tag == "wake-window") timeouts += timeoutMs
+            wakeLocks.acquire(tag, timeoutMs)
+        }
+        val factory = ScriptedFactory(listOf(Step.EstablishThenHang))
+        val tunnel = connection(
+            InMemoryStore(credentials),
+            factory,
+            wakeLocks = recording,
+            idleTimeoutMs = { 5 * MINUTE },
+            isScreenOn = { false },
+        )
+        tunnel.start(wokenByPush = true)
+        runCurrent()
+        val session = factory.sessions.single()
+        advanceTimeBy(30_000)
+        session.request()
+        advanceTimeBy(4 * MINUTE - 30_000)
+        // Both still in flight; the cap moves to 5 min after this request, not after the wake.
+        session.request()
+
+        advanceTimeBy(5 * MINUTE - 1)
+        runCurrent()
+        assertTrue("held past 5 min from the wake", wakeLocks.holds("wake-window"))
+        assertEquals("each request re-takes the lock with the full cap as its timeout", List(3) { 5 * MINUTE }, timeouts)
+        assertEquals("the replaced locks were released", 2, wakeLocks.released.count { it == "wake-window" })
+
+        advanceTimeBy(1)
+        runCurrent()
+        assertFalse(wakeLocks.holds("wake-window"))
+    }
+
+    @Test
+    fun `a screen-off conversation in continuous use keeps the wake window`() = runTest {
+        val wakeLocks = RecordingWakeLocks()
+        val factory = ScriptedFactory(listOf(Step.EstablishThenHang))
+        val tunnel = wokenConnection(factory, wakeLocks, idleTimeoutMs = 5 * MINUTE)
+        tunnel.start(wokenByPush = true)
+        runCurrent()
+        val session = factory.sessions.single()
+
+        repeat(10) {
+            session.request()
+            advanceTimeBy(10_000)
+            session.requestDone()
+            advanceTimeBy(50_000)
+            runCurrent()
+            assertTrue("minute ${it + 1}", wakeLocks.holds("wake-window"))
+        }
+        tunnel.stop()
+        assertFalse(wakeLocks.holds("wake-window"))
+    }
+
+    @Test
+    fun `switching to always connected releases the wake window and no new one is taken`() = runTest {
+        var always = false
+        val wakeLocks = RecordingWakeLocks()
+        val tunnel = connection(
+            InMemoryStore(credentials),
+            ScriptedFactory(listOf(Step.EstablishThenHang, Step.EstablishThenHang)),
+            wakeLocks = wakeLocks,
+            idleTimeoutMs = { IDLE_MS },
+            isScreenOn = { false },
+            keepRetryingProvider = { always },
+        )
+        tunnel.start(wokenByPush = true)
+        runCurrent()
+        assertTrue(wakeLocks.holds("wake-window"))
+
+        always = true
+        tunnel.onIdleSettingsChanged()
+        assertFalse(wakeLocks.holds("wake-window"))
+
+        advanceTimeBy(MINUTE)
+        tunnel.onPushWake()
+        runCurrent()
+        assertEquals(1, wakeLocks.acquired.count { it == "wake-window" })
+        tunnel.stop()
+    }
+
+    @Test
+    fun `a wake into an open window takes no second lock and restarts the grace`() = runTest {
+        val wakeLocks = RecordingWakeLocks()
+        val tunnel = wokenConnection(ScriptedFactory(listOf(Step.EstablishThenHang, Step.EstablishThenHang)), wakeLocks)
+        tunnel.start(wokenByPush = true)
+        runCurrent()
+
+        advanceTimeBy(50_000)
+        assertTrue(tunnel.onPushWake())
+        runCurrent()
+        assertEquals(1, wakeLocks.acquired.count { it == "wake-window" })
+
+        advanceTimeBy(50_000)
+        runCurrent()
+        assertTrue("100 s after the first wake, 50 s after the second", wakeLocks.holds("wake-window"))
+        advanceTimeBy(10_000)
+        runCurrent()
+        assertFalse(wakeLocks.holds("wake-window"))
+        tunnel.stop()
+    }
+
+    @Test
+    fun `a short wake window cap is logged in seconds`() = runTest {
+        val log = TunnelLog(mirrorToLogcat = false)
+        val tunnel = connection(
+            InMemoryStore(credentials),
+            ScriptedFactory(listOf(Step.EstablishThenHang)),
+            wakeLocks = RecordingWakeLocks(),
+            idleTimeoutMs = { 45_000L },
+            isScreenOn = { false },
+            log = log,
+        )
+        tunnel.start(wokenByPush = true)
+        runCurrent()
+
+        val messages = log.entries.value.map { it.message }
+        assertTrue(messages.toString(), messages.contains("Wake window opened (screen off, at most 45 s without a request)"))
+        tunnel.stop()
+    }
+
+    @Test
+    fun `stopping the tunnel releases the wake window`() = runTest {
+        val wakeLocks = RecordingWakeLocks()
+        val tunnel = wokenConnection(ScriptedFactory(listOf(Step.EstablishThenHang)), wakeLocks)
+        tunnel.start(wokenByPush = true)
+        runCurrent()
+        assertTrue(wakeLocks.holds("wake-window"))
+
+        tunnel.stop()
+
+        assertFalse(wakeLocks.holds("wake-window"))
+    }
+
+    @Test
+    fun `turning the screen on releases the wake window`() = runTest {
+        val wakeLocks = RecordingWakeLocks()
+        val tunnel = wokenConnection(ScriptedFactory(listOf(Step.EstablishThenHang)), wakeLocks)
+        tunnel.start(wokenByPush = true)
+        runCurrent()
+
+        tunnel.onScreenOn()
+
+        assertFalse(wakeLocks.holds("wake-window"))
+        assertTrue(tunnel.state.value is TunnelState.Connected)
+        tunnel.stop()
+    }
+
+    @Test
+    fun `always connected never takes the wake window`() = runTest {
+        val wakeLocks = RecordingWakeLocks()
+        val factory = ScriptedFactory(listOf(Step.EstablishThenHang))
+        val tunnel = wokenConnection(factory, wakeLocks, keepRetrying = true)
+        tunnel.start(wokenByPush = true)
+        runCurrent()
+        factory.sessions.single().request()
+        tunnel.onPushWake()
+        runCurrent()
+
+        assertFalse("wake-window" in wakeLocks.acquired)
+        tunnel.stop()
+    }
+
+    @Test
+    fun `no wake window with the screen on or for a manual connect`() = runTest {
+        val screenOnLocks = RecordingWakeLocks()
+        val screenOn = wokenConnection(ScriptedFactory(listOf(Step.EstablishThenHang)), screenOnLocks, screenOn = { true })
+        screenOn.start(wokenByPush = true)
+        runCurrent()
+        assertFalse("wake-window" in screenOnLocks.acquired)
+        screenOn.stop()
+
+        val manualLocks = RecordingWakeLocks()
+        val manual = wokenConnection(ScriptedFactory(listOf(Step.EstablishThenHang)), manualLocks)
+        manual.start()
+        runCurrent()
+        assertFalse("wake-window" in manualLocks.acquired)
+        manual.stop()
+    }
+
+    @Test
+    fun `a wake that revives a running tunnel opens the wake window`() = runTest {
+        val wakeLocks = RecordingWakeLocks()
+        val tunnel = wokenConnection(ScriptedFactory(listOf(Step.EstablishThenHang, Step.EstablishThenHang)), wakeLocks)
+        tunnel.start()
+        runCurrent()
+        advanceTimeBy(5 * MINUTE)
+
+        assertTrue(tunnel.onPushWake())
+        runCurrent()
+
+        assertTrue(wakeLocks.holds("wake-window"))
+        tunnel.stop()
+        assertFalse(wakeLocks.holds("wake-window"))
     }
 
     private companion object {

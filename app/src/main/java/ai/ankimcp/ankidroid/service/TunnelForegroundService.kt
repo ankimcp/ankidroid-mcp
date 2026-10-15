@@ -55,7 +55,7 @@ class TunnelForegroundService : Service() {
         graph.screenMonitor.start(onScreenOff = graph.tunnel::onScreenOff, onScreenOn = graph.tunnel::onScreenOn)
         startTunnelForServiceStart(
             readExtra = { key, default -> intent?.getBooleanExtra(key, default) ?: default },
-            startTunnel = graph.tunnel::start,
+            startTunnel = { graph.tunnel.start() },
         )
 
         if (stateJob == null) {

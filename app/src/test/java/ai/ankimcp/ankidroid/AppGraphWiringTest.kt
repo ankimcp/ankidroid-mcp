@@ -125,7 +125,7 @@ class AppGraphWiringTest {
         scope = backgroundScope,
         credentialStore = store,
         refresher = TokenRefresher(store, DeviceFlowClient("ws://127.0.0.1:9", OkHttpClient())),
-        sessionFactory = TunnelSessionFactory { _, onEstablished, _ -> HangingSession(onEstablished) },
+        sessionFactory = TunnelSessionFactory { _, onEstablished, _, _ -> HangingSession(onEstablished) },
         policy = ReconnectPolicy(),
         networkAvailable = MutableStateFlow(true),
         log = log,

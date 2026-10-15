@@ -175,8 +175,9 @@ class ListDecksToolTest {
         )
         assertEquals(3, calls.get())
         assertTrue(text, text.contains("did not answer"))
-        assertTrue(text, text.contains("put it to sleep"))
+        assertTrue(text, text.contains("put AnkiDroid to sleep"))
         assertTrue(text, text.contains("open AnkiDroid once"))
+        assertTrue(text, text.contains("allow AnkiDroid to run in the background"))
     }
 
     @Test

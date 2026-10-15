@@ -47,8 +47,11 @@ the tunnel open and uses more battery.
 
 **Battery.** Realme, Oppo and OnePlus (ColorOS), Xiaomi, Vivo and Huawei/Honor phones freeze
 background apps even while they show a notification. Allow background activity, and set
-battery optimisation to "Don't optimise", for both **AnkiDroid MCP** and **AnkiDroid**. The
-Status tab names the setting for your phone.
+battery optimisation to "Don't optimise", for both **AnkiDroid MCP** and **AnkiDroid**; each
+app has its own page (on ColorOS: App info > Battery usage > "Allow background activity").
+Without it for AnkiDroid MCP, Claude's requests time out with the screen off; without it for
+AnkiDroid, `list_decks` reports that AnkiDroid was asleep. The Status tab names the setting
+for your phone and opens both App info pages.
 
 ## What leaves your phone
 

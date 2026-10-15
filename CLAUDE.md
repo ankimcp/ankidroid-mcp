@@ -31,7 +31,7 @@ app/src/main/java/ai/ankimcp/ankidroid/
   auth/        DeviceFlowClient, Credentials, CredentialStore (Keystore AES-GCM), TokenRefresher
   tunnel/      Protocol (messages, close codes), TunnelClient (OkHttp WS, one connection,
                freeze-aware ping watchdog), ReconnectPolicy, TunnelConnection (reconnect state
-               machine + idle timer + screen-off/freeze stop),
+               machine + idle timer + screen-off/freeze stop + push-wake wake window),
                WakeSupport (ElapsedClock, WakeLocks, WakeupScheduler interfaces)
   push/        PushMessaging (Firebase seam) + FirebasePushMessaging, PushTokenRegistrar
                (/devices/push), PushRegistrationState(+Store), PushCoordinator (when to
