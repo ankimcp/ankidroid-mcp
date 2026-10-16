@@ -63,8 +63,16 @@ sealed interface TunnelState {
 
 /** Builds a fresh [TunnelSession] for one attempt. */
 fun interface TunnelSessionFactory {
-    /** [onRequest] must be called for every `request` frame the session receives. */
-    fun create(credentials: Credentials, onEstablished: (url: String) -> Unit, onRequest: () -> Unit): TunnelSession
+    /**
+     * [onRequest] must be called for every `request` frame the session receives, and
+     * [onRequestDone] once for each of them after its response was flushed (or it was cancelled).
+     */
+    fun create(
+        credentials: Credentials,
+        onEstablished: (url: String) -> Unit,
+        onRequest: () -> Unit,
+        onRequestDone: () -> Unit,
+    ): TunnelSession
 }
 
 /**
@@ -87,7 +95,10 @@ fun interface TunnelSessionFactory {
  *  - while the idle timer is enabled (on demand with working wake-ups), the run also stops when
  *    the screen turns off ([onScreenOff]) or when a tick on [uptimeClock] comes much later than
  *    scheduled, i.e. the OS froze the process;
- *  - a push wake-up while it looks connected drops the socket and reconnects ([onPushWake]).
+ *  - a push wake-up while it looks connected drops the socket and reconnects ([onPushWake]);
+ *  - in on-demand mode, a run started or revived by a push wake-up with the screen off holds a
+ *    `wake-window` wake lock while Claude is using it, because OEM freezers stop the process the
+ *    moment its last wake lock is released (D49).
  */
 class TunnelConnection(
     private val scope: CoroutineScope,
@@ -146,6 +157,15 @@ class TunnelConnection(
     /** When the current run last published Connected, on [elapsedClock]. */
     private var connectedAtMs = Long.MIN_VALUE / 2
 
+    // Wake window (D49).
+    private var wakeWindowLock: AutoCloseable? = null
+    private var wakeWindowCapAt = 0L
+    private var wakeWindowGraceUntil = 0L
+    private var wakeWindowJob: Job? = null
+
+    /** Requests of the current run whose response has not been flushed yet. */
+    private var requestsInFlight = 0
+
     /** When the current run last received a `request` frame, on [elapsedClock]. */
     private var lastRequestFrameMs = Long.MIN_VALUE / 2
 
@@ -169,10 +189,12 @@ class TunnelConnection(
 
     val isRunning: Boolean get() = synchronized(lock) { job?.isActive == true }
 
-    fun start() {
+    /** [wokenByPush]: started by a push wake-up, so it may open the wake window (D49). */
+    fun start(wokenByPush: Boolean = false) {
         synchronized(lock) {
             if (job?.isActive == true) return
             val gen = ++generation
+            requestsInFlight = 0
             log.info("Connecting tunnel")
             // Set synchronously so observers never see a stale Stopped from a previous run.
             _state.value = TunnelState.Connecting(0)
@@ -190,6 +212,7 @@ class TunnelConnection(
             lastActivityWasRequest = false
             armIdleLocked(gen)
             launchFreezeWatchLocked(gen)
+            if (wokenByPush) openWakeWindowLocked(gen)
         }
     }
 
@@ -288,6 +311,8 @@ class TunnelConnection(
     /** The screen turned on: a screen-off stop still waiting for requests is called off. */
     fun onScreenOn() {
         synchronized(lock) {
+            // The user is here: the freezer leaves a foreground phone alone.
+            releaseWakeWindowLocked("screen on")
             if (screenOffStopJob?.isActive != true) return
             screenOffStopJob?.cancel()
             screenOffStopJob = null
@@ -316,6 +341,7 @@ class TunnelConnection(
             releaseWakeupHoldLocked()
             wakeupHold = wakeLocks.acquire("wakeup", WAKEUP_HOLD_MS)
             launchFreezeWatchLocked(generation)
+            openWakeWindowLocked(generation)
             session = activeSession?.takeIf { _state.value is TunnelState.Connected }
             val now = elapsedClock.elapsedMs()
             alive = session != null &&
@@ -344,6 +370,7 @@ class TunnelConnection(
             lastActivityMs = elapsedClock.elapsedMs()
             lastActivityWasRequest = false
             armIdleLocked(generation)
+            if (keepRetrying()) releaseWakeWindowLocked("always connected")
         }
     }
 
@@ -394,6 +421,7 @@ class TunnelConnection(
                         attemptLock.close()
                     },
                     { onRequestFrame(gen) },
+                    { onRequestDone(gen) },
                 )
                 if (!register(gen, session)) throw CancellationException("Tunnel stopped")
 
@@ -569,8 +597,20 @@ class TunnelConnection(
             lastActivityMs = elapsedClock.elapsedMs()
             lastActivityWasRequest = true
             lastRequestFrameMs = lastActivityMs
+            requestsInFlight++
+            if (wakeWindowLock != null) renewWakeWindowCapLocked()
+            extendWakeWindowLocked(gen)
             // The timers stay armed for the old deadline; when they fire they see the new one and re-arm.
             if (_idleDeadline.value != null) _idleDeadline.value = idleTimeoutMs()?.let { lastActivityMs + it }
+        }
+    }
+
+    /** A request's response has been flushed (or it was cancelled): the grace period starts now. */
+    private fun onRequestDone(gen: Long) {
+        synchronized(lock) {
+            if (gen != generation) return
+            requestsInFlight = (requestsInFlight - 1).coerceAtLeast(0)
+            extendWakeWindowLocked(gen)
         }
     }
 
@@ -667,6 +707,73 @@ class TunnelConnection(
         freezeWatchId++
         screenOffStopJob?.cancel()
         screenOffStopJob = null
+        releaseWakeWindowLocked("tunnel stopped")
+    }
+
+    /**
+     * Opens (or extends) the wake window of run [gen]: on demand only, and only with the screen
+     * off, where an OEM freezer would otherwise stop the process between Claude's requests. A
+     * wake-up into an open window only restarts the grace period.
+     */
+    private fun openWakeWindowLocked(gen: Long) {
+        if (gen != generation || keepRetrying() || isScreenOn()) return
+        if (wakeWindowLock == null) {
+            val cap = renewWakeWindowCapLocked()
+            log.debug("Wake window opened (screen off, at most ${formatDuration(cap)} without a request)")
+        }
+        extendWakeWindowLocked(gen)
+    }
+
+    /**
+     * Moves the cap to one idle window from now, like the idle timer counts from the last
+     * request, and replaces the lock with one whose own timeout is that cap, so it can never
+     * outlive the session even if the timer does not run. Returns the cap.
+     */
+    private fun renewWakeWindowCapLocked(): Long {
+        val cap = idleTimeoutMs() ?: WAKE_WINDOW_FALLBACK_CAP_MS
+        wakeWindowCapAt = elapsedClock.elapsedMs() + cap
+        // The new lock is taken before the old one goes, so the CPU is never left without one.
+        val previous = wakeWindowLock
+        wakeWindowLock = wakeLocks.acquire("wake-window", cap)
+        previous?.close()
+        return cap
+    }
+
+    /** Restarts the grace period from now. */
+    private fun extendWakeWindowLocked(gen: Long) {
+        if (wakeWindowLock == null || gen != generation) return
+        wakeWindowGraceUntil = elapsedClock.elapsedMs() + WAKE_WINDOW_GRACE_MS
+        armWakeWindowTimerLocked(gen)
+    }
+
+    /** While requests are in flight only the cap can end the window; otherwise the grace or the cap. */
+    private fun armWakeWindowTimerLocked(gen: Long) {
+        val now = elapsedClock.elapsedMs()
+        val until = if (requestsInFlight > 0) wakeWindowCapAt else minOf(wakeWindowGraceUntil, wakeWindowCapAt)
+        wakeWindowJob?.cancel()
+        wakeWindowJob = scope.launch {
+            delay((until - now).coerceAtLeast(0))
+            synchronized(lock) {
+                if (gen != generation || wakeWindowLock == null) return@launch
+                val t = elapsedClock.elapsedMs()
+                when {
+                    t >= wakeWindowCapAt -> releaseWakeWindowLocked("no request for the idle window")
+                    requestsInFlight == 0 && t >= wakeWindowGraceUntil -> releaseWakeWindowLocked("no requests")
+                    else -> armWakeWindowTimerLocked(gen)
+                }
+            }
+        }
+    }
+
+    private fun formatDuration(ms: Long): String = if (ms < 60_000) "${ms / 1000} s" else "${ms / 60_000} min"
+
+    private fun releaseWakeWindowLocked(reason: String) {
+        wakeWindowJob?.cancel()
+        wakeWindowJob = null
+        val held = wakeWindowLock ?: return
+        wakeWindowLock = null
+        held.close()
+        log.debug("Wake window released ($reason)")
     }
 
     /**
@@ -772,6 +879,12 @@ class TunnelConnection(
          * connection; it is kept. Generous because FCM delivery itself can take seconds.
          */
         const val RECENT_ACTIVITY_MS = 10_000L
+
+        /** The wake window stays open this long after a wake-up or after the last response. */
+        const val WAKE_WINDOW_GRACE_MS = 60_000L
+
+        /** Cap on the wake window when no idle window applies (push not registered yet). */
+        const val WAKE_WINDOW_FALLBACK_CAP_MS = 30 * 60_000L
 
         private const val WAKE_LOCK_SLACK_MS = 2_000L
         private const val NO_GENERATION = -1L

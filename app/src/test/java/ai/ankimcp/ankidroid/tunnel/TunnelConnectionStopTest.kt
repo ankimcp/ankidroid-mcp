@@ -77,7 +77,7 @@ class TunnelConnectionStopTest {
         scope = backgroundScope,
         credentialStore = store,
         refresher = TokenRefresher(store, DeviceFlowClient(authBaseUrl, OkHttpClient())),
-        sessionFactory = TunnelSessionFactory { _, onEstablished, onRequest ->
+        sessionFactory = TunnelSessionFactory { _, onEstablished, onRequest, _ ->
             Session(onEstablished, onRequest, closeWith).also { sessions += it }
         },
         policy = ReconnectPolicy(),

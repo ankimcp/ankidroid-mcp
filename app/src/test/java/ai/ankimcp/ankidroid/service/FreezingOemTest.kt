@@ -2,6 +2,7 @@ package ai.ankimcp.ankidroid.service
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class FreezingOemTest {
@@ -15,6 +16,13 @@ class FreezingOemTest {
         assertEquals(FreezingOem.Vivo, FreezingOem.detect("vivo", "iQOO"))
         assertEquals(FreezingOem.Huawei, FreezingOem.detect("HUAWEI", "HUAWEI"))
         assertEquals(FreezingOem.Huawei, FreezingOem.detect("HONOR", "HONOR"))
+    }
+
+    @Test
+    fun `every maker's instructions cover both apps`() {
+        FreezingOem.entries.forEach {
+            assertTrue(it.name, it.instructions.contains("both AnkiDroid MCP and AnkiDroid"))
+        }
     }
 
     @Test

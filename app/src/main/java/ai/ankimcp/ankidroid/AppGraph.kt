@@ -134,7 +134,7 @@ class AppGraph(context: Context) {
         scope = appScope,
         credentialStore = credentialStore,
         refresher = tokenRefresher,
-        sessionFactory = TunnelSessionFactory { credentials, onEstablished, onRequest ->
+        sessionFactory = TunnelSessionFactory { credentials, onEstablished, onRequest, onRequestDone ->
             TunnelClient(
                 http = tunnelHttp,
                 url = config.tunnelUrl,
@@ -146,6 +146,7 @@ class AppGraph(context: Context) {
                 wakeLocks = wakeLocks,
                 onEstablished = onEstablished,
                 onRequest = onRequest,
+                onRequestDone = onRequestDone,
                 uptimeClock = AndroidUptimeClock,
             )
         },
@@ -221,7 +222,7 @@ internal fun buildWakeHandler(
     isSignedIn = isSignedIn,
     isSigningOut = { push.isSigningOut },
     startService = { startService(true) },
-    startTunnel = tunnel::start,
+    startTunnel = { tunnel.start(wokenByPush = true) },
     stopTunnel = tunnel::stop,
     wakeRunningTunnel = tunnel::onPushWake,
     notifier = notifier,

@@ -229,6 +229,10 @@ High-priority FCM **data** message (no `notification` payload):
 - Otherwise: start the foreground service (its notification is shown if the user allowed
   notifications) and connect, in either connection mode. In on-demand mode the session then
   ends after the idle window (15 / 30 / 60 min) without a `request` frame.
+- In on-demand mode with the screen off, the phone stays awake (a wake lock) from the wake
+  until 60 s after its last response has been written to the socket, so OEM freezers cannot
+  stop it mid-conversation; a request that arrives later than that may find the app frozen
+  and go through a new wake-up (docs/DECISIONS.md D49).
 - Signed out, or signing out: no connection, only a log line.
 - The refresh token is dead (`invalid_grant` when refreshing before the connection) or access
   was revoked: no connection; a local notification "Sign in again to AnkiMCP" is posted.

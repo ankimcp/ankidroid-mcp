@@ -93,6 +93,8 @@ class TunnelClientTest {
         clock: ElapsedClock = ElapsedClock.Monotonic,
         uptimeClock: ElapsedClock = ElapsedClock.Monotonic,
         wakeLocks: WakeLocks = WakeLocks.None,
+        onRequestDone: () -> Unit = {},
+        queueSize: (WebSocket) -> Long = { it.queueSize() },
     ) = TunnelClient(
         http = http,
         url = url,
@@ -109,6 +111,8 @@ class TunnelClientTest {
         healthTimeoutMs = healthTimeoutMs,
         requestTimeoutMs = requestTimeoutMs,
         uptimeClock = uptimeClock,
+        onRequestDone = onRequestDone,
+        queueSize = queueSize,
     )
 
     private fun nextMessage(): JsonObject {
@@ -586,6 +590,69 @@ class TunnelClientTest {
         tunnel.disconnect()
         withTimeout(5_000) { run.await() }
         Unit
+    }
+
+    @Test
+    fun `the request lock is released and the request reported done only once the send queue drains`() = runBlocking {
+        val queued = AtomicLong(1)
+        val events = CopyOnWriteArrayList<String>()
+        val done = CompletableDeferred<Unit>()
+        val tunnel = flushTestClient(events, done) { queued.get() }
+        val run = async(Dispatchers.IO) { tunnel.run() }
+
+        assertEquals("response", nextMessage()["type"]!!.jsonPrimitive.content)
+        delay(300)
+        assertEquals("the response is still queued: the lock stays and nothing is reported", emptyList<String>(), events.toList())
+        assertTrue(tunnel.hasRequestsInFlight())
+
+        queued.set(0)
+        withTimeout(1_000) { done.await() }
+        assertEquals(listOf("released request", "done"), events.toList())
+        assertFalse(tunnel.hasRequestsInFlight())
+
+        tunnel.disconnect()
+        withTimeout(5_000) { run.await() }
+        Unit
+    }
+
+    @Test
+    fun `a send queue that never drains releases the request lock after the flush cap`() = runBlocking {
+        val events = CopyOnWriteArrayList<String>()
+        val done = CompletableDeferred<Unit>()
+        val tunnel = flushTestClient(events, done) { 1L }
+        val run = async(Dispatchers.IO) { tunnel.run() }
+
+        assertEquals("response", nextMessage()["type"]!!.jsonPrimitive.content)
+        val sentAt = System.nanoTime()
+        withTimeout(TunnelClient.FLUSH_TIMEOUT_MS + 2_000) { done.await() }
+        val waitedMs = (System.nanoTime() - sentAt) / 1_000_000
+
+        assertTrue("waited $waitedMs ms", waitedMs >= TunnelClient.FLUSH_TIMEOUT_MS - 300)
+        assertEquals(listOf("released request", "done"), events.toList())
+
+        tunnel.disconnect()
+        withTimeout(5_000) { run.await() }
+        Unit
+    }
+
+    /** A relay that sends one request; the client records lock releases and "done" into [events]. */
+    private fun flushTestClient(events: MutableList<String>, done: CompletableDeferred<Unit>, queueSize: () -> Long): TunnelClient {
+        enqueueRelay { ws ->
+            establish(ws)
+            ws.send(
+                """{"type":"request","requestId":"r1","method":"POST","path":"/mcp","headers":{},""" +
+                    """"body":"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}"}""",
+            )
+        }
+        val wakeLocks = WakeLocks { tag, _ -> AutoCloseable { events += "released $tag" } }
+        return client(
+            wakeLocks = wakeLocks,
+            onRequestDone = {
+                events += "done"
+                done.complete(Unit)
+            },
+            queueSize = { queueSize() },
+        )
     }
 
     @Test

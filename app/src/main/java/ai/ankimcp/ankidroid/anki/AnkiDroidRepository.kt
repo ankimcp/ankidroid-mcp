@@ -85,8 +85,11 @@ class AnkiDroidRepository(
         val rows = when (val result = queryRetryingNull { provider.queryDecks() }) {
             is AnkiResult.Success -> result.value
                 ?: return AnkiResult.Unavailable(
-                    "AnkiDroid did not answer the deck query, probably because the phone put it to sleep. " +
-                        "Try again; if it keeps happening, open AnkiDroid once and try again.",
+                    "AnkiDroid did not answer the deck query: the phone put AnkiDroid to sleep in the " +
+                        "background. Quick fix: open AnkiDroid once on the phone and try again. To stop it " +
+                        "happening, allow AnkiDroid to run in the background (on Realme/Oppo/OnePlus: App " +
+                        "info > Battery usage > \"Allow background activity\"); the AnkiDroid MCP Status tab " +
+                        "names the setting for this phone.",
                 )
             is AnkiResult.Failure -> return result
         }

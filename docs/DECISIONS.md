@@ -1,7 +1,7 @@
 # Decisions
 
-Decisions made while building phase 1, the push wake-up feature after it (D31-D39), and the
-fixes after the first on-device trial (D40-D44), and the branding and UI round (D45-D48),
+Decisions made while building phase 1, the push wake-up feature after it (D31-D39), the
+fixes after the on-device trials (D40-D44, D49) and the branding and UI round (D45-D48),
 without a chance to ask. Each one is cheap to
 revisit.
 
@@ -533,13 +533,60 @@ gets frozen too.
   caused by CPU suspend (uptime did not move) is judged at once as before (D27), so silent
   sockets are still found in Doze. On the trial phone this had aborted a live connection with
   "No server ping in 76s" while draining the backlog that held the ping.
-- **D44. A null cursor from AnkiDroid is retried.** A frozen AnkiDroid answered the deck query
-  with a null cursor in 13 ms. Acquiring the provider normally thaws its process (an
-  assumption from how the framework treats provider clients; not yet verified on a device), so a null
-  cursor is retried after 0.5 s and 1.5 s (three attempts, about 2 s), each attempt a separate
-  submission to the provider pool so no thread sleeps, all inside the existing 20 s budget
-  (D13). Still null after that: "AnkiDroid did not answer the deck query, probably because the
-  phone put it to sleep. Try again; if it keeps happening, open AnkiDroid once and try again."
+- **D44. A null cursor from AnkiDroid is retried briefly; the real fix is AnkiDroid's own
+  background setting.** A frozen AnkiDroid answered the deck query with a null cursor in
+  13 ms. The first version assumed acquiring the provider thaws AnkiDroid's process. The push
+  trial on 2026-10-16 (Realme, ColorOS) disproved that: Hans freezes AnkiDroid about 6 s after
+  the screen goes off, and its binder calls are then proxied (`OplusBinderProxy proxy: true`
+  in logcat) instead of thawing it, so `AnkiProvider` keeps getting a null cursor. With
+  "Allow background activity" on for both apps the same query works with the screen off (36
+  decks in 342 ms, AnkiDroid cold-started by the query).
+  - The retry stays (after 0.5 s and 1.5 s, three attempts over about 2 s, each a separate
+    submission to the provider pool, inside the 20 s budget of D13), because it is cheap and
+    still helps when AnkiDroid is merely slow to start; it does not help against a freezer.
+  - When it fails, the tool error says AnkiDroid was put to sleep in the background, gives
+    "open AnkiDroid once and try again" as the quick fix, and points at allowing AnkiDroid to
+    run in the background (with the ColorOS path as the example) and at the Status tab.
+  - The battery card (D42) and README now say the setting is needed for both apps, and on
+    freezing makers the card has one App info button per app.
+
+- **D49. Wake-window wake lock after a push wake with the screen off.** Push-wake trial on dev,
+  2026-10-16 (Realme, ColorOS, `OplusHansManager` in logcat): the FCM wake arrived at
+  06:12:24Z and the tunnel was up 0.5 s later with the screen off; the relayed request arrived
+  at 06:12:42.239Z, the tool answered at 06:12:44.266Z, the `ankimcp:request` wake lock was
+  released at 06:12:44.271Z, and Hans froze the process at 06:12:44.266Z ("freeze uid ...
+  scene LcdOff"). The response frame was still in OkHttp's send queue; the relay timed the
+  request out at 30 s. Hans keeps an app runnable only while it holds a wake lock and freezes
+  it as soon as the last one is released.
+  - The per-request lock is now released only after the response has left OkHttp's queue:
+    after `send`, `TunnelClient` waits until `WebSocket.queueSize()` is 0, polling every
+    20 ms, at most 2 s (inside the request lock's 25 s + 5 s timeout; the queue size is an
+    injectable seam so tests can hold it non-empty). That only proves the
+    frame was written to the socket, not that the relay received it, which is why the window
+    below adds a grace period.
+  - `TunnelConnection` holds a separate `ankimcp:wake-window` partial wake lock for runs
+    started (`start(wokenByPush = true)`) or revived (`onPushWake`) by a push wake while the
+    screen is off, in on-demand mode only (`keepRetrying` false; Always connected never takes
+    it). It lasts until 60 s after the last response was flushed (or after the wake, if no
+    request comes); every request frame and every finished request restarts the 60 s, and
+    while a request is in flight only the cap can end it. Cap: one idle window (30 min when
+    push is not registered yet) after the last request frame (or the wake, before any
+    request), counted like the idle timer so a screen-off conversation in continuous use keeps
+    its lock. Every request frame re-takes the lock with that cap as its own timeout (the new
+    lock before the old one is released), so even without the timer it cannot outlive the
+    session. A wake-up into an open window only restarts the grace period, with no new lock. Released early on screen on (Hans leaves a foreground phone
+    alone), when Always connected is chosen, and whenever the run ends (`stopRun`/`finish`).
+    Sessions started with Connect, or with the screen on, never take it.
+  - Battery: the lock is only held while Claude is actively using the phone, plus 60 s.
+    Opening and release are logged at debug level ("Wake window opened (screen off, at most
+    N min / N s without a request)", "Wake window released (reason)"); the per-request re-take
+    is not logged.
+  - Requests are counted per run in `TunnelConnection` from the new `onRequestDone` callback
+    (`TunnelSessionFactory.create` gained a fourth parameter), which `TunnelClient` calls once
+    per request after the flush, or when the request is cancelled.
+  - Not a substitute for "Allow background activity": without it Hans still freezes the app
+    once the window closes, and the relay's next request goes to a push wake again (the
+    freeze watch, D40, ends the stale run).
 
 ## MCP
 
@@ -642,9 +689,8 @@ gets frozen too.
 - No build with a real `google-services.json` was made (the file was not available), so the
   google-services plugin path is untested.
 - FID-based FCM registration (D38) is not adopted yet.
-- D40-D44 are unit-tested only; not yet re-run on the Realme trial phone, and push wake-ups
-  are not yet enabled server side, so the on-demand "next request wakes it" path is untested
-  end to end.
+- D40-D44 were built before the push trial; the trial (D44, D49) confirmed the push wake and
+  the screen-off connect on dev. D49 is unit-tested only and not yet re-run on the phone.
 - D45-D48 were built and unit-tested without running on a device; the icon and colours have
   not been checked on a launcher or in dark mode yet.
 - No Play listing assets, privacy policy or data-safety form (the
