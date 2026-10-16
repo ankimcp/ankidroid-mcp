@@ -31,7 +31,7 @@ Thanks for testing AnkiDroid MCP. Takes about 10 minutes to set up, then just us
    a. Tap Connect, then ask Claude "list my Anki decks". Do the decks and due counts match AnkiDroid?
    b. Turn the screen off, wait 5 minutes, ask Claude again from another device (or the web). Does the phone wake up and answer? How long did it take?
    c. Reboot the phone, then ask Claude again.
-   d. Switch to "Always connected", leave it for a few hours with the screen off, ask Claude again. Note battery use in Android's battery settings.
+   d. Leave the phone for a few hours with the screen off, ask Claude again. Note battery use in Android's battery settings.
    e. Tap Disconnect in the notification. Sign out and sign in again.
    f. If you have a Realme, Oppo, OnePlus, Xiaomi/Redmi/Poco, Vivo/iQOO or Huawei/Honor phone: follow the Battery card on the Status tab and tell me if it helped.
 6. When something goes wrong: Log tab > Share log, and post it with what you did at https://forum.ankimcp.ai (the shared log has no email or tokens). 

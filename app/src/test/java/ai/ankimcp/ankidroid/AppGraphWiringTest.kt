@@ -16,7 +16,6 @@ import ai.ankimcp.ankidroid.push.SignInNotifier
 import ai.ankimcp.ankidroid.push.WakeHandler
 import ai.ankimcp.ankidroid.service.serviceStartExtras
 import ai.ankimcp.ankidroid.service.startTunnelForServiceStart
-import ai.ankimcp.ankidroid.settings.ConnectionMode
 import ai.ankimcp.ankidroid.settings.IdleWindow
 import ai.ankimcp.ankidroid.settings.InMemoryKeyValueStore
 import ai.ankimcp.ankidroid.tunnel.CloseCodes
@@ -130,7 +129,7 @@ class AppGraphWiringTest {
         networkAvailable = MutableStateFlow(true),
         log = log,
         // Same rule AppGraph uses, on demand with the default window.
-        idleTimeoutMs = { idleTimeoutMs(ConnectionMode.OnDemand, IdleWindow.Minutes30, push.wakeUpsReady) },
+        idleTimeoutMs = { idleTimeoutMs(IdleWindow.Minutes30, push.wakeUpsReady) },
         elapsedClock = ElapsedClock { testScheduler.currentTime },
     )
 

@@ -15,7 +15,7 @@ outbound connection only; no ports are opened on it. This version has one read-o
   once), with its API enabled (Settings > Advanced > "Enable AnkiDroid API", on by default).
 - An [AnkiMCP](https://ankimcp.ai) account (the same one you use with the desktop add-on or
   CLI).
-- For on-demand wake-ups: Google Play services on the phone.
+- For push wake-ups: Google Play services on the phone.
 
 ## Install
 
@@ -41,9 +41,10 @@ outbound connection only; no ports are opened on it. This version has one read-o
    the Status tab (**Copy URL**), and sign in with the same AnkiMCP account. Then ask Claude
    to "list my Anki decks".
 
-**Connection modes.** *On demand* (the default) lets Claude wake the phone with a push message
-and disconnects when the screen turns off or after 15-60 idle minutes; *Always connected* keeps
-the tunnel open and uses more battery.
+**How it connects.** Claude wakes the phone with a push message when it needs your decks; the
+connection closes when the screen turns off or after 15, 30 or 60 idle minutes (your choice on
+the Status tab), and the next request wakes the phone again. There is no "always connected"
+mode.
 
 **Battery.** Realme, Oppo and OnePlus (ColorOS), Xiaomi, Vivo and Huawei/Honor phones freeze
 background apps even while they show a notification. Allow background activity, and set
@@ -66,7 +67,7 @@ See the [AnkiMCP privacy policy](https://ankimcp.ai/privacy/).
 ## Troubleshooting
 
 Open the **Log** tab and tap **Share log** (or **Copy**). The shared text has the app version,
-Android version, phone model and connection mode, but not your email, and anything that looks
+Android version, phone model, idle window and whether push wake-ups are registered, but not your email, and anything that looks
 like a token is removed. Post it with a short description on
 [forum.ankimcp.ai](https://forum.ankimcp.ai/).
 
@@ -84,7 +85,7 @@ Needs JDK 17+ and an Android SDK with platform 36 (`sdk.dir` in `local.propertie
 
 `app/google-services.json` (Firebase) is optional and not in the repo. Without it the build
 prints `app/google-services.json not found: building without Firebase push`, the app shows
-"Push not configured in this build", and on demand works like a manual connection.
+"Push not configured in this build", and the app works like a manual connection.
 
 Point a debug build at another relay, e.g. the development deployment, or a local one from the
 emulator:

@@ -52,7 +52,6 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        if (savedInstanceState == null) viewModel.autoConnectIfEnabled()
         setContent {
             AnkiMcpTheme { AppRoot(viewModel) }
         }
@@ -71,7 +70,6 @@ private fun AppRoot(viewModel: MainViewModel) {
     val credentialsLoaded by viewModel.credentialsLoaded.collectAsStateWithLifecycle()
     val signIn by viewModel.signIn.collectAsStateWithLifecycle()
     val tunnelState by viewModel.tunnelState.collectAsStateWithLifecycle()
-    val connectionMode by viewModel.connectionMode.collectAsStateWithLifecycle()
     val idleWindow by viewModel.idleWindow.collectAsStateWithLifecycle()
     val pushState by viewModel.pushState.collectAsStateWithLifecycle()
     val wakeUpsReady by viewModel.wakeUpsReady.collectAsStateWithLifecycle()
@@ -191,7 +189,6 @@ private fun AppRoot(viewModel: MainViewModel) {
                 tunnelState = tunnelState,
                 defaultMcpUrl = viewModel.defaultMcpUrl,
                 connection = ConnectionUi(
-                    mode = connectionMode,
                     idleWindow = idleWindow,
                     pushAvailable = viewModel.pushAvailable,
                     pushState = pushState,
@@ -207,7 +204,6 @@ private fun AppRoot(viewModel: MainViewModel) {
                 signingOut = signingOut,
                 onConnect = connect,
                 onDisconnect = viewModel::disconnect,
-                onModeChange = viewModel::setConnectionMode,
                 onIdleWindowChange = viewModel::setIdleWindow,
                 onDismissFreezeNotice = viewModel::dismissFreezeNotice,
                 onLogout = viewModel::logout,

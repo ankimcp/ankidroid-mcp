@@ -208,8 +208,6 @@ class TunnelConnectionTest {
         store: CredentialStore,
         factory: TunnelSessionFactory,
         network: StateFlow<Boolean> = MutableStateFlow(true),
-        keepRetrying: Boolean = false,
-        keepRetryingProvider: () -> Boolean = { keepRetrying },
         policy: ReconnectPolicy = ReconnectPolicy(random = Random(0)),
         wakeLocks: WakeLocks = WakeLocks.None,
         wakeups: WakeupScheduler = WakeupScheduler.None,
@@ -233,7 +231,6 @@ class TunnelConnectionTest {
             policy = policy,
             networkAvailable = network,
             log = log,
-            keepRetrying = keepRetryingProvider,
             wakeLocks = wakeLocks,
             wakeups = wakeups,
             idleTimeoutMs = idleTimeoutMs,
@@ -374,24 +371,9 @@ class TunnelConnectionTest {
         tunnel.start()
         val stopped = tunnel.awaitStopped()
 
-        assertTrue(stopped.reason, stopped.reason.contains("Max reconnection attempts"))
+        assertEquals("Couldn't reach the AnkiMCP server. Claude's next request will try again.", stopped.reason)
+        assertFalse(stopped.reloginRequired)
         assertEquals(10, factory.usedTokens.size)
-    }
-
-    @Test
-    fun `keep connected keeps retrying every 30s after the attempt budget is used up`() = runTest {
-        val factory = ScriptedFactory(List(11) { Step.Fail() } + Step.EstablishThenClose(CloseCodes.NORMAL))
-        val tunnel = connection(InMemoryStore(credentials), factory, keepRetrying = true)
-        val states = recordStates(tunnel)
-
-        tunnel.start()
-        val stopped = tunnel.awaitStopped()
-
-        assertEquals(CloseCodes.NORMAL, stopped.code)
-        assertEquals(12, factory.usedTokens.size)
-        val persistent = states.filterIsInstance<TunnelState.Reconnecting>().filter { it.persistent }
-        assertEquals(listOf(10, 11), persistent.map { it.attempt })
-        assertTrue(persistent.all { it.delayMs == 30_000L })
     }
 
     @Test
@@ -795,7 +777,7 @@ class TunnelConnectionTest {
     }
 
     @Test
-    fun `idle timer is disabled in always connected mode`() = runTest {
+    fun `idle timer is off without wake-ups`() = runTest {
         val idleWakeups = RecordingWakeups()
         val tunnel = connection(
             InMemoryStore(credentials),
@@ -857,7 +839,7 @@ class TunnelConnectionTest {
     }
 
     @Test
-    fun `switching to always connected mid-session cancels the idle timer`() = runTest {
+    fun `losing wake-ups mid-session cancels the idle timer`() = runTest {
         var window: Long? = IDLE_MS
         val idleWakeups = RecordingWakeups()
         val tunnel = connection(
@@ -906,18 +888,16 @@ class TunnelConnectionTest {
     @Test
     fun `the idle timer keeps counting while the tunnel reconnects`() = runTest {
         val factory = ScriptedFactory(List(20) { Step.Fail() })
-        val tunnel = connection(
-            InMemoryStore(credentials),
-            factory,
-            keepRetrying = true,
-            idleTimeoutMs = { IDLE_MS },
-        )
+        // Shorter than the backoffs of the 10-attempt budget, so the idle stop comes first.
+        val window = 20_000L
+        val tunnel = connection(InMemoryStore(credentials), factory, idleTimeoutMs = { window })
 
         tunnel.start()
-        advanceTimeBy(IDLE_MS)
+        advanceTimeBy(window)
         runCurrent()
 
         assertTrue((tunnel.state.value as TunnelState.Stopped).idleTimeout)
+        assertTrue("it was still retrying", factory.sessions.size in 2..9)
     }
 
     @Test
@@ -1251,7 +1231,7 @@ class TunnelConnectionTest {
     }
 
     @Test
-    fun `an always-connected freeze with the screen off is reported`() = runTest {
+    fun `a freeze of a manual session with the screen off is reported`() = runTest {
         var frozen = 0L
         val reports = mutableListOf<Long>()
         val tunnel = connection(
@@ -1305,7 +1285,7 @@ class TunnelConnectionTest {
     }
 
     @Test
-    fun `a freeze in always connected mode is reported but keeps the tunnel`() = runTest {
+    fun `a freeze of a manual session (no wake-ups) is reported but keeps the tunnel`() = runTest {
         var frozen = 0L
         val reports = mutableListOf<Long>()
         val tunnel = connection(
@@ -1355,13 +1335,11 @@ class TunnelConnectionTest {
     private fun TestScope.wokenConnection(
         factory: ScriptedFactory,
         wakeLocks: RecordingWakeLocks,
-        keepRetrying: Boolean = false,
         screenOn: () -> Boolean = { false },
         idleTimeoutMs: Long = IDLE_MS,
     ) = connection(
         InMemoryStore(credentials),
         factory,
-        keepRetrying = keepRetrying,
         wakeLocks = wakeLocks,
         idleTimeoutMs = { idleTimeoutMs },
         isScreenOn = screenOn,
@@ -1509,33 +1487,6 @@ class TunnelConnectionTest {
     }
 
     @Test
-    fun `switching to always connected releases the wake window and no new one is taken`() = runTest {
-        var always = false
-        val wakeLocks = RecordingWakeLocks()
-        val tunnel = connection(
-            InMemoryStore(credentials),
-            ScriptedFactory(listOf(Step.EstablishThenHang, Step.EstablishThenHang)),
-            wakeLocks = wakeLocks,
-            idleTimeoutMs = { IDLE_MS },
-            isScreenOn = { false },
-            keepRetryingProvider = { always },
-        )
-        tunnel.start(wokenByPush = true)
-        runCurrent()
-        assertTrue(wakeLocks.holds("wake-window"))
-
-        always = true
-        tunnel.onIdleSettingsChanged()
-        assertFalse(wakeLocks.holds("wake-window"))
-
-        advanceTimeBy(MINUTE)
-        tunnel.onPushWake()
-        runCurrent()
-        assertEquals(1, wakeLocks.acquired.count { it == "wake-window" })
-        tunnel.stop()
-    }
-
-    @Test
     fun `a wake into an open window takes no second lock and restarts the grace`() = runTest {
         val wakeLocks = RecordingWakeLocks()
         val tunnel = wokenConnection(ScriptedFactory(listOf(Step.EstablishThenHang, Step.EstablishThenHang)), wakeLocks)
@@ -1599,21 +1550,6 @@ class TunnelConnectionTest {
 
         assertFalse(wakeLocks.holds("wake-window"))
         assertTrue(tunnel.state.value is TunnelState.Connected)
-        tunnel.stop()
-    }
-
-    @Test
-    fun `always connected never takes the wake window`() = runTest {
-        val wakeLocks = RecordingWakeLocks()
-        val factory = ScriptedFactory(listOf(Step.EstablishThenHang))
-        val tunnel = wokenConnection(factory, wakeLocks, keepRetrying = true)
-        tunnel.start(wokenByPush = true)
-        runCurrent()
-        factory.sessions.single().request()
-        tunnel.onPushWake()
-        runCurrent()
-
-        assertFalse("wake-window" in wakeLocks.acquired)
         tunnel.stop()
     }
 

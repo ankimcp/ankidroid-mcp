@@ -39,8 +39,6 @@ class TunnelForegroundService : Service() {
         val graph = appGraph
         lastStartId = startId
         if (intent?.action == ACTION_STOP) {
-            // An explicit Disconnect also leaves "Always connected", same as in the app.
-            graph.settings.onUserDisconnect()
             graph.tunnel.stop()
             shutdown()
             return START_NOT_STICKY
@@ -73,8 +71,7 @@ class TunnelForegroundService : Service() {
         // An earlier shutdown may have been refused for this start, and if this start began no
         // run (e.g. a wake-up whose run already ended), Stopped is not emitted again.
         if (graph.tunnel.state.value is TunnelState.Stopped) shutdown()
-        // Not sticky: after a process kill we only come back via the app, BootReceiver or a
-        // push wake-up, all of which respect the user's connection mode.
+        // Not sticky: after a process kill we only come back via the app or a push wake-up.
         return START_NOT_STICKY
     }
 
@@ -154,10 +151,9 @@ class TunnelForegroundService : Service() {
             }
         }
 
-        /** User-initiated disconnect from the app; also leaves "Always connected". */
+        /** User-initiated disconnect from the app: ends this session; the next wake-up connects again. */
         fun stop(context: Context) {
             val graph = context.appGraph
-            graph.settings.onUserDisconnect()
             graph.tunnel.stop()
             context.stopService(Intent(context, TunnelForegroundService::class.java))
         }
@@ -167,12 +163,7 @@ class TunnelForegroundService : Service() {
             TunnelState.WaitingForNetwork -> "Waiting for network"
             is TunnelState.Connecting -> "Connecting…"
             is TunnelState.Connected -> "Connected: Claude can reach your decks"
-            is TunnelState.Reconnecting ->
-                if (state.persistent) {
-                    "Retrying every ${state.delayMs / 1000}s (attempt ${state.attempt})"
-                } else {
-                    "Reconnecting in ${(state.delayMs + 999) / 1000}s (attempt ${state.attempt})"
-                }
+            is TunnelState.Reconnecting -> "Reconnecting in ${(state.delayMs + 999) / 1000}s (attempt ${state.attempt})"
             is TunnelState.Stopped -> "Disconnected: ${state.reason}"
         }
     }

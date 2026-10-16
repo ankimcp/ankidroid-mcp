@@ -12,7 +12,7 @@ two come from libraries.
 | `FOREGROUND_SERVICE` | normal | Required for any foreground service | none (covered by the type below) |
 | `FOREGROUND_SERVICE_SPECIAL_USE` | normal, Play-reviewed | `TunnelForegroundService`, type `specialUse` | **Foreground service declaration** (below) |
 | `POST_NOTIFICATIONS` | runtime (Android 13+) | The foreground service notification (with Disconnect) and "Sign in again to AnkiMCP". Asked after sign-in; the app works without it, the user just does not see when Claude wakes the phone | none |
-| `RECEIVE_BOOT_COMPLETED` | normal | `BootReceiver`: in Always connected mode only, restart the tunnel after a reboot or app update (also WorkManager re-schedules its jobs after boot) | none |
+| `RECEIVE_BOOT_COMPLETED` | normal (from androidx.work) | Not declared by the app. WorkManager's `RescheduleReceiver` re-schedules the push-registration retry, daily check and token-delete jobs after a reboot. The app itself does nothing at boot and never starts the tunnel then | none |
 | `WAKE_LOCK` | normal | Short partial wake locks around reconnects, liveness checks from while-idle alarms, and finishing in-flight requests on screen off (`AndroidWakeLocks`); also used by FCM and WorkManager | none |
 | `com.ichi2.anki.permission.READ_WRITE_DATABASE` | runtime (AnkiDroid's own, dangerous level) | Read decks through AnkiDroid's ContentProvider | none in Play Console; explain in the listing (done) |
 | `com.google.android.c2dm.permission.RECEIVE` | normal (from firebase-messaging) | Receive FCM wake-up messages | none |
@@ -40,9 +40,9 @@ Persistent outbound connection that lets the user's AI assistant read their loca
 ```
 AnkiDroid MCP lets the user's AI assistant (Claude) read the user's AnkiDroid flashcard decks on the phone. AnkiDroid only exposes the collection through a local ContentProvider, so the data cannot be fetched from a server: the phone has to answer each request itself. TunnelForegroundService keeps one outbound WebSocket open to the AnkiMCP relay (wss://ankidroid.ankimcp.ai). The relay forwards the assistant's requests over this connection; the app reads AnkiDroid and sends the answer back on the same socket. No ports are opened on the phone.
 
-The service starts in two ways: (1) the user taps Connect in the app, or (2) in the default "On demand" mode, the AnkiMCP server sends a high-priority FCM data message when the user's assistant makes a request and the phone is not connected. While it runs, a notification shows the connection state and a Disconnect action.
+The service starts in two ways: (1) the user taps Connect in the app, or (2) the AnkiMCP server sends a high-priority FCM data message when the user's assistant makes a request and the phone is not connected. While it runs, a notification shows the connection state and a Disconnect action.
 
-The service stops when the user taps Disconnect or signs out; in On demand mode also after a user-chosen idle period (15, 30 or 60 minutes) without requests, and as soon as the screen turns off. Only in the user-selected "Always connected" mode does it stay up (and restart after reboot) until the user disconnects.
+The service stops when the user taps Disconnect or signs out. When push wake-ups are set up (the normal case), it also stops as soon as the screen turns off and after a user-chosen idle period (15, 30 or 60 minutes) without requests; without them, a session the user started by tapping Connect stays up until Disconnect. It is never started at boot.
 
 None of the other foreground service types fit: this is not data sync (nothing is uploaded or downloaded in bulk; the connection waits for requests that the user makes through the assistant), not media, location, connected device or phone call, and the work cannot be deferred to WorkManager or a job because each request must be answered within the assistant's ~25 second timeout.
 ```
@@ -50,7 +50,7 @@ None of the other foreground service types fit: this is not data sync (nothing i
 **User impact if the task is deferred or interrupted by the system:**
 
 ```
-The user's request to their assistant fails: Claude reports that it cannot reach the phone, or the request times out after about 25 seconds, and the user has to repeat it. If the connection is killed while idle, in On demand mode the next request wakes the phone again through a push message; in Always connected mode the assistant loses access until the app reconnects.
+The user's request to their assistant fails: Claude reports that it cannot reach the phone, or the request times out after about 25 seconds, and the user has to repeat it. If the connection is killed while idle, the next request wakes the phone again through a push message.
 ```
 
 **Video link (required):** record a 30-60 s screen video (unlisted YouTube or Drive link)

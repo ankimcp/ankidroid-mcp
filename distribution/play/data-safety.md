@@ -77,7 +77,7 @@ The FCM registration token (and the Firebase Installation ID behind it). Matches
 | Collected | Yes. Sent to AnkiMCP (`PUT /devices/push`) so it can send wake-ups; Firebase sends the FID to Google to issue the token. |
 | Shared | No. Google is a service provider delivering our push messages. |
 | Ephemeral | No. Stored by AnkiMCP until sign-out. |
-| Required or optional | Required. There is no switch; the token is registered whenever the user is signed in (also in Always connected mode, D34). Only created after sign-in (D39). |
+| Required or optional | Required. There is no switch; the token is registered whenever the user is signed in (D34). Only created after sign-in (D39). |
 | Purposes | App functionality |
 
 Unverified: whether firebase-installations creates the FID at app start before sign-in

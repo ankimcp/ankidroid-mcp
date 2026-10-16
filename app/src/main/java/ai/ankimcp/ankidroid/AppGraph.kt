@@ -31,7 +31,6 @@ import ai.ankimcp.ankidroid.service.ScreenMonitor
 import ai.ankimcp.ankidroid.service.TunnelAlarmReceiver
 import ai.ankimcp.ankidroid.service.TunnelForegroundService
 import ai.ankimcp.ankidroid.service.notificationBlockReason
-import ai.ankimcp.ankidroid.settings.ConnectionMode
 import ai.ankimcp.ankidroid.settings.ConnectionSettings
 import ai.ankimcp.ankidroid.settings.FreezeNotice
 import ai.ankimcp.ankidroid.settings.IdleWindow
@@ -153,10 +152,9 @@ class AppGraph(context: Context) {
         policy = ReconnectPolicy(),
         networkAvailable = networkMonitor.available,
         log = log,
-        keepRetrying = { settings.alwaysConnected },
         wakeLocks = wakeLocks,
         wakeups = AlarmWakeupScheduler(appContext),
-        idleTimeoutMs = { idleTimeoutMs(settings.mode.value, settings.idleWindow.value, push.wakeUpsReady) },
+        idleTimeoutMs = { idleTimeoutMs(settings.idleWindow.value, push.wakeUpsReady) },
         idleWakeups = AlarmWakeupScheduler(
             appContext,
             requestCode = TunnelAlarmReceiver.IDLE_REQUEST_CODE,
@@ -186,11 +184,11 @@ class AppGraph(context: Context) {
 }
 
 /**
- * On-demand sessions end after the idle window, but only when a push wake-up can bring the
- * tunnel back; without push, on-demand falls back to a manual session that stays up.
+ * Sessions end after the idle window, but only when a push wake-up can bring the tunnel back;
+ * without push, a session is a manual one that stays up until Disconnect.
  */
-internal fun idleTimeoutMs(mode: ConnectionMode, window: IdleWindow, wakeUpsReady: Boolean): Long? =
-    if (mode == ConnectionMode.OnDemand && wakeUpsReady) window.millis else null
+internal fun idleTimeoutMs(window: IdleWindow, wakeUpsReady: Boolean): Long? =
+    if (wakeUpsReady) window.millis else null
 
 /**
  * The idle timer reads [wakeUpsReady] only when it is (re)armed, so a registration that succeeds
