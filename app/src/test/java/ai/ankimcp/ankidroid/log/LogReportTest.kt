@@ -11,7 +11,7 @@ class LogReportTest {
         appVersion = "0.1.0",
         androidVersion = "16 (API 36)",
         device = "Google Pixel 8",
-        connectionMode = "on demand",
+        idleWindowMinutes = 30,
         pushRegistered = true,
     )
     private val utc = TimeZone.getTimeZone("UTC")
@@ -33,7 +33,7 @@ class LogReportTest {
             """
             AnkiDroid MCP 0.1.0
             Android 16 (API 36), Google Pixel 8
-            Connection mode: on demand
+            Idle window: 30 min
             Push wake-ups registered: yes
             Log: 3 entries, oldest first, times in UTC+00:00
 

@@ -1,9 +1,8 @@
 # Decisions
 
 Decisions made while building phase 1, the push wake-up feature after it (D31-D39), the
-fixes after the on-device trials (D40-D44, D49) and the branding and UI round (D45-D48),
-without a chance to ask. Each one is cheap to
-revisit.
+fixes after the on-device trials (D40-D44, D49), the branding and UI round (D45-D48) and the
+removal of "Always connected" (D50), without a chance to ask. Each one is cheap to revisit.
 
 ## Target SDK
 
@@ -32,9 +31,9 @@ revisit.
   AGP 8.13 (checked against `minCompileSdk` / `minAndroidGradlePluginVersion` on Google Maven):
   core-ktx 1.18.0, activity-compose 1.13.0, lifecycle 2.10.0, browser 1.10.0, Compose BOM
   2026.06.01 (ui 1.11.4, material3 1.4.0). core 1.19, lifecycle-*-compose 2.11 and Compose UI
-  1.12 (BOM 2026.08+) require compileSdk 37 and AGP 9.1. `lifecycle-process` (same 2.10.0) is
-  declared explicitly for `ProcessLifecycleOwner` (D20); it was already on the runtime
-  classpath transitively, so it adds nothing to the APK. Firebase and WorkManager pins: D33.
+  1.12 (BOM 2026.08+) require compileSdk 37 and AGP 9.1. `lifecycle-process` was declared for
+  the auto-connect's `ProcessLifecycleOwner` (D20) and removed with it (D50). Firebase and
+  WorkManager pins: D33.
 - **D4. OkHttp 4.12.0** as the brief asked (5.x exists). MockWebServer 4.12.0 for tests.
 - **D5. JUnit 4 + kotlinx-coroutines-test + MockWebServer.** No Robolectric: everything
   under test is plain Kotlin. `unitTests.isReturnDefaultValues = true` covers `android.util.Log`.
@@ -107,8 +106,8 @@ revisit.
   SharedPreferences file. No user-authentication requirement on the key, since the tunnel must
   reconnect in the background. The blob is read lazily on first `load()`, never on the main
   thread: `AnkiMcpApp` triggers it on `Dispatchers.IO` and the UI shows a spinner until it
-  finishes; `BootReceiver` uses `goAsync()`, reads on `Dispatchers.IO` and then finishes the
-  broadcast. Only errors that mean the blob can never be decrypted (`AEADBadTagException`,
+  finishes (the boot receiver that also read it is gone, D50). Only errors that mean the blob
+  can never be decrypted (`AEADBadTagException`,
   `KeyPermanentlyInvalidatedException`, `UnrecoverableKeyException`, including a missing key;
   also when wrapped as a cause) delete it. Anything else (Keystore busy, I/O) is logged, the
   ciphertext is kept, the user looks signed out for now, and the next `load()` retries. Base64
@@ -132,38 +131,28 @@ revisit.
 ## Tunnel and service
 
 - **D18. Deviations from the add-on's reconnect behaviour** (offline waiting, handshake close
-  codes, auth-loop guard, network-change reconnect, always-connected retries, device-flow
-  retries, idle timeout) are listed in docs/PROTOCOL.md under "Deviations".
+  codes, auth-loop guard, network-change reconnect, device-flow retries, idle timeout) are listed in docs/PROTOCOL.md under "Deviations".
 - **D19. Foreground service** type `specialUse` with a `PROPERTY_SPECIAL_USE_FGS_SUBTYPE`
   explanation. The type is passed to `startForeground` only on API 34+; on 26-33 the plain
   overload is used (passing an unknown type bit there can throw). The service only owns the
   process lifetime and the notification; the tunnel state machine lives in `AppGraph` so the
   UI can observe it directly. The service stops itself whenever the tunnel stops, including
   after an idle timeout (D32).
-- **D20. Connect is user-initiated or a push wake-up**, never automatic on first use.
-  "Always connected" mode (D31; the phase-1 "Keep connected" switch) makes the app auto-connect
-  on launch, after boot and after an app update (`BootReceiver`), and keeps retrying every 30 s
-  after the 10-attempt budget is used up (D28). The service is `START_NOT_STICKY`, so a process
+- **D20. Connect is user-initiated or a push wake-up**, never automatic. (The "Always
+  connected" mode with auto-connect on launch, boot and app update, `BootReceiver` and the
+  retry-every-30-s loop was removed in D50.) The service is `START_NOT_STICKY`, so a process
   kill does not silently resurrect a tunnel. Disconnect, in the app or from the notification
-  action, also switches "Always connected" back to on demand: an explicit disconnect should not
-  be undone by the next launch or boot.
+  action, ends the current session; the next wake-up connects again.
   - Android 12+ refuses `startForegroundService` from the background. Every start goes through
     `TunnelForegroundService.start`, which catches the refusal
     (`ForegroundServiceStartNotAllowedException`, an `IllegalStateException`, which is also
     what 26-30 throw), logs it to the tunnel log and shows the tunnel as stopped with "Could not
     start in the background. Open the app to connect." (unless a tunnel is already running).
     A high-priority FCM message is one of the allowed exemptions (D36).
-  - Auto-connect on launch waits for the credential decrypt *and* for the process to be in the
-    foreground (`ProcessLifecycleOwner` at least `STARTED`). If the user left the app before
-    the decrypt finished, it connects the next time the app comes to the foreground (while the
-    ViewModel is alive). The conditions (always connected, signed in, AnkiDroid ready, not
-    already running) are checked at that moment. `ProcessLifecycleOwner` dispatches `ON_STOP`
-    700 ms after the last activity stops; if Android refuses a start made in that window, the
-    catch above handles it.
-- **D21. POST_NOTIFICATIONS** (API 33+) is requested right after sign-in succeeds, whenever
-  On demand is selected, and when the user taps Connect. Sign-in and mode changes ask only if
-  the permission is missing, and the request waits until the activity is started again (sign-in
-  usually completes while the browser is in front). In on-demand mode nobody taps Connect, so
+- **D21. POST_NOTIFICATIONS** (API 33+) is requested right after sign-in succeeds and when the
+  user taps Connect. Sign-in asks only if the permission is missing, and the request waits
+  until the activity is started again (sign-in usually completes while the browser is in
+  front). With push wake-ups nobody taps Connect, so
   asking only there left a woken session's notification invisible, silently dropped the "Sign
   in again" notification (D36), and FCM deprioritises high-priority messages that produce no
   visible notification. The tunnel starts whatever the answer is; without the permission the
@@ -204,10 +193,9 @@ revisit.
     validation never succeeds (blocked connectivity check) look offline, and the tunnel waits.
   **Pending:** on-device Doze testing (`adb shell dumpsys deviceidle force-idle`, then
   `unforce`) has not been done; no device or emulator was available.
-- **D28. Always-connected retries.** In on-demand mode the add-on's rule stands: stop after
-  10 consecutive failures (the next wake-up starts again). In "Always connected" the loop keeps
-  going at the 30 s cap (state `Reconnecting(persistent = true)`, shown as "Retrying every
-  30s"). In Doze the alarm limit (D29) stretches that to whatever the system allows.
+- **D28. Retry budget.** The add-on's rule: stop after 10 consecutive failures; the next
+  wake-up or Connect starts again. (The "Always connected" loop that kept retrying every 30 s
+  after that was removed in D50.)
 - **D29. `setAndAllowWhileIdle`, not exact alarms.** `setExactAndAllowWhileIdle` needs
   `SCHEDULE_EXACT_ALARM` (denied by default since Android 14, user must grant it in settings)
   or `USE_EXACT_ALARM` (Play only allows it for alarm-clock/calendar apps). The inexact
@@ -217,7 +205,8 @@ revisit.
 
 ## Push wake-up and connection modes
 
-- **D31. Two connection modes**, persisted in the existing `settings` SharedPreferences file
+- **D31. Two connection modes** (superseded by D50: only on demand is left; kept here for the
+  history), persisted in the existing `settings` SharedPreferences file
   (`settings/ConnectionSettings`): **On demand** (default) and **Always connected**.
   - On demand: the server sends a high-priority FCM data message when Claude makes a request
     and the phone is not connected; the app connects and disconnects again after the idle
@@ -284,13 +273,12 @@ revisit.
   token registered by this version less than 7 days ago causes no request.
   - The daily check is unique periodic work `push-registration-daily`, every 24 h, needs a
     network, enqueued with `KEEP` on every app start and sign-in (so it keeps its schedule) and
-    cancelled at logout. It exists because in Always connected mode the process can live for
-    weeks, and the 7-day renewal used to run only at process start.
+    cancelled at logout. It was added for the Always connected mode (removed, D50), where the
+    process could live for weeks; it still renews the registration for a process that lives
+    long, and costs one job a day.
   - The connection mode is no longer a trigger (it was in the first version): the mode is not
-    in the request body, so a re-PUT on a mode change told the server nothing. The device stays
-    registered in Always connected mode. A wake-up then either finds the tunnel connected
-    (no-op) or restarts it, which is useful when it gave up. Deregistering on a mode switch
-    would add a DELETE/PUT pair per toggle for no gain.
+    in the request body, so a re-PUT on a mode change told the server nothing. (There is no
+    mode any more, D50.)
   - Network errors, 429 and 5xx (and a token Firebase can't produce) schedule a WorkManager
     retry: unique work `push-registration`, `KEEP`, needs a network, exponential backoff from
     1 minute, gives up after 10 runs (~13 h with WorkManager's 5 h cap) until the next trigger.
@@ -378,8 +366,8 @@ revisit.
     shown and the tunnel log says so (D21).
 - **D37. FGS special-use description** in the manifest now says the service is also started by
   a push message from the AnkiMCP server and stops after the idle period, since Play reviews
-  that text against actual behaviour. It also says that in on-demand mode it stops when the
-  screen turns off (D40).
+  that text against actual behaviour. It also says that it stops when the screen turns off
+  (D40), and no longer mentions an always-on mode (D50).
 - **D38. Registration tokens, not Firebase Installation IDs.** firebase-messaging 25.1.0
   (firebase-android-sdk PR #8087, "FCM V1 API Migration") deprecated `getToken`, `deleteToken`
   and `onNewToken` in favour of an opt-in FID registration: `FirebaseMessaging.register()` /
@@ -416,8 +404,8 @@ Stock Android does not freeze foreground services; Oppo/Realme/OnePlus (ColorOS/
 Xiaomi (MIUI/HyperOS), Vivo (Funtouch/OriginOS) and Huawei/Honor (EMUI/MagicOS) do. AnkiDroid
 gets frozen too.
 
-- **D40. On demand ends the session when the phone goes to sleep.** While the idle timer runs
-  (on demand with working wake-ups, D32), two more events end the session through the idle
+- **D40. A session ends when the phone goes to sleep.** While the idle timer runs (wake-ups
+  registered, D32), on every phone (not only the freezing makers; decided, D50), two more events end the session through the idle
   timer's path (`stopRun`: socket closed with 1000, alarms and wake locks released, generation
   bumped, the service stops on the `Stopped` state), published as
   `Stopped(1000, reason, phoneAsleep = true)`. On a screen-off stop the relay then drops its KV
@@ -441,13 +429,13 @@ gets frozen too.
     would count every CPU suspend as a gap.) By then the relay has already terminated the
     socket for the missed pong and removed its KV entry, so the 1000 close goes nowhere; the
     stop's value here is the local cleanup (service, notification, alarms, wake locks) instead of
-    a reconnect loop on a phone that will freeze again. Only on demand with wake-ups ends the
-    session; Always connected keeps its reconnect loop.
-  - Battery note (D42): a freeze is reported to `FreezeNotice` in Always connected (or on
-    demand without wake-ups), and in on demand when the screen was on at the previous tick and
-    at the detecting one (`PowerManager.isInteractive`). The expected on-demand case, a session
-    a wake-up started with the screen off that then freezes, ends quietly: that is the design
-    working, not something for the user to fix.
+    a reconnect loop on a phone that will freeze again. Only a session with wake-ups ends;
+    a manual one (no wake-ups) keeps its reconnect loop.
+  - Battery note (D42): a freeze is reported to `FreezeNotice` for a manual session (no
+    wake-ups), and otherwise when the screen was on at the previous tick and at the detecting
+    one (`PowerManager.isInteractive`). The expected case, a session a wake-up started with the
+    screen off that then freezes, ends quietly: that is the design working, not something for
+    the user to fix.
   - A push wake-up while the run still looks connected (D36) means the relay has no connection
     for us, typically a socket that died while frozen, with the wake-up's thaw arriving before
     the freeze tick. `onPushWake` drops the session and reconnects at once, and restarts the
@@ -483,9 +471,11 @@ gets frozen too.
   so it would fail exactly when it matters. It would also reconnect on every glance at the
   lock screen. Claude's next request arrives as a push wake-up, which is an allowed exemption
   and already starts the service and the tunnel (D36). Opening the app does not reconnect
-  either (on demand never auto-connects, D20). The Status screen says so: "Disconnects when the
-  screen turns off or after N min without requests, and does not reconnect when you turn the
-  screen on: Claude's next request wakes it again."
+  either (the app never auto-connects, D20). The relay is to hold the first request after a
+  screen-off stop while it wakes the phone, so that request does not fail (relay side, not
+  built yet). The Status screen's Connection card says: "Claude wakes your phone when it needs
+  your decks; the connection closes when the screen turns off or after N min without
+  requests."
 - **D42. Battery card: settings links, no direct exemption request.** The card stays optional
   and blocks nothing.
   - No `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` permission and no
@@ -566,16 +556,16 @@ gets frozen too.
     below adds a grace period.
   - `TunnelConnection` holds a separate `ankimcp:wake-window` partial wake lock for runs
     started (`start(wokenByPush = true)`) or revived (`onPushWake`) by a push wake while the
-    screen is off, in on-demand mode only (`keepRetrying` false; Always connected never takes
-    it). It lasts until 60 s after the last response was flushed (or after the wake, if no
+    screen is off. It lasts until 60 s after the last response was flushed (or after the wake, if no
     request comes); every request frame and every finished request restarts the 60 s, and
     while a request is in flight only the cap can end it. Cap: one idle window (30 min when
     push is not registered yet) after the last request frame (or the wake, before any
     request), counted like the idle timer so a screen-off conversation in continuous use keeps
     its lock. Every request frame re-takes the lock with that cap as its own timeout (the new
     lock before the old one is released), so even without the timer it cannot outlive the
-    session. A wake-up into an open window only restarts the grace period, with no new lock. Released early on screen on (Hans leaves a foreground phone
-    alone), when Always connected is chosen, and whenever the run ends (`stopRun`/`finish`).
+    session. A wake-up into an open window only restarts the grace period, with no new lock.
+    Released early on screen on (Hans leaves a foreground phone alone) and whenever the run
+    ends (`stopRun`/`finish`).
     Sessions started with Connect, or with the screen on, never take it.
   - Battery: the lock is only held while Claude is actively using the phone, plus 60 s.
     Opening and release are logged at debug level ("Wake window opened (screen off, at most
@@ -587,6 +577,32 @@ gets frozen too.
   - Not a substitute for "Allow background activity": without it Hans still freezes the app
     once the window closes, and the relay's next request goes to a push wake again (the
     freeze watch, D40, ends the stale run).
+
+- **D50. "Always connected" is gone; on demand is the only mode.** Decided by Anatoly on
+  2026-10-16. Push wake-ups cover the use case (D31-D36, D49), the free tier is disconnected
+  by the relay after an hour anyway, and the always-on socket was the only reason the
+  battery-exemption question (D42) kept coming back. The screen-off stop (D40) stays on every
+  phone; the relay is to hold the first request after it while it wakes the phone (D41).
+  - Removed: `ConnectionMode`; the Status screen's mode radio group (the Connection card is
+    now the idle-window chips with one line of explanation); `BootReceiver`, its manifest
+    entry and the app's own `RECEIVE_BOOT_COMPLETED`; auto-connect on launch
+    (`autoConnectWhenForeground`) and the `lifecycle-process` dependency it needed; the
+    `keepRetrying` retry-every-30-s loop and `Reconnecting.persistent`; the Always branches of
+    the wake window (D49) and the battery note (D40); "leave Always connected" on Disconnect.
+  - `RECEIVE_BOOT_COMPLETED` is still in the merged manifest: WorkManager declares it for its
+    `RescheduleReceiver`, which puts the push-registration retry, daily check and token-delete
+    jobs (D34, D35) back after a reboot. Removing it with `tools:node="remove"` would lose
+    those jobs at every reboot, so it stays, attributed to WorkManager in
+    distribution/play/permissions.md. The app does nothing itself at boot.
+  - Migration: `ConnectionSettings` deletes the stored `connection_mode` ("always" or
+    "on_demand") and the first builds' `keep_connected` flag on first load, so every install
+    is on demand; the idle window is kept.
+  - Disconnect ends the current session, nothing more; the next wake-up connects again. To
+    stop wake-ups altogether the user signs out.
+  - The idle timer still needs working wake-ups (D32): without them a session is a manual
+    one that stays up until Disconnect, and the Connection card says so.
+  - The shared log's header says "Idle window: N min" instead of the connection mode (D48).
+  - A process the system killed is not resurrected; the next wake-up starts it, as before.
 
 ## MCP
 
@@ -667,7 +683,7 @@ gets frozen too.
 - **D48. Shared logs carry device facts, no account data, and are redacted.** "Share log"
   sends `ACTION_SEND` `text/plain` through a chooser, "Copy log" puts the same text on the
   clipboard. `log/LogReport` builds it: app version, Android release and API level,
-  `Build.MANUFACTURER`/`MODEL`, connection mode, "Push wake-ups registered: yes/no" (the
+  `Build.MANUFACTURER`/`MODEL`, idle window (the connection mode until D50), "Push wake-ups registered: yes/no" (the
   current FCM token is registered; never the token), then the entries oldest first with a
   full date and the UTC offset. The email is never in the header, and the signed-in email
   (and the user id when it is 8+ characters) is removed verbatim if a message contains it.

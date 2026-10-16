@@ -40,9 +40,8 @@ What you need
 - Claude with a custom connector: in Claude, open Settings > Connectors > Add custom connector, paste the MCP server URL the app shows (Copy URL), and sign in with the same AnkiMCP account.
 - Android 8.0 or newer. Google Play services for on-demand wake-ups.
 
-Connection modes
-- On demand (default): when Claude needs your decks and the phone is not connected, AnkiMCP sends a push message and the app connects. It disconnects again when the screen turns off, or after 15, 30 or 60 minutes without requests (you choose). Turning the screen on does not reconnect; Claude's next request wakes the phone again.
-- Always connected: the connection stays open, also after a reboot, until you tap Disconnect. Uses more battery.
+How it connects
+When Claude needs your decks and the phone is not connected, AnkiMCP sends a push message and the app connects. It disconnects again when the screen turns off, or after 15, 30 or 60 minutes without requests (you choose). Turning the screen on does not reconnect; Claude's next request wakes the phone again. Nothing runs in the background between requests.
 While connected, a notification with a Disconnect button is shown.
 
 Battery and background limits

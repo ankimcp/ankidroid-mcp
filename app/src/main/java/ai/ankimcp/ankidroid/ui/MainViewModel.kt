@@ -11,7 +11,6 @@ import ai.ankimcp.ankidroid.service.FreezingOem
 import ai.ankimcp.ankidroid.service.TunnelForegroundService
 import ai.ankimcp.ankidroid.service.allNotificationsShown
 import ai.ankimcp.ankidroid.service.hasNotificationPermission
-import ai.ankimcp.ankidroid.settings.ConnectionMode
 import ai.ankimcp.ankidroid.settings.IdleWindow
 import ai.ankimcp.ankidroid.tunnel.TunnelState
 import android.app.Application
@@ -19,8 +18,6 @@ import android.os.Build
 import android.os.PowerManager
 import android.os.SystemClock
 import androidx.lifecycle.AndroidViewModel
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -71,11 +68,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val credentialsLoaded = graph.credentialStore.loaded
     val tunnelState: StateFlow<TunnelState> = graph.tunnel.state
     val logEntries = graph.log.entries
-    val connectionMode: StateFlow<ConnectionMode> = graph.settings.mode
     val idleWindow: StateFlow<IdleWindow> = graph.settings.idleWindow
     val pushState: StateFlow<PushRegistrationState> = graph.push.state
 
-    /** The current FCM token is registered, so on-demand sessions end when idle. */
+    /** The current FCM token is registered, so sessions end when idle. */
     val wakeUpsReady: StateFlow<Boolean> = graph.push.wakeUpsReadyState
 
     /** False when this build has no `google-services.json`. */
@@ -105,9 +101,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _notificationPermissionRequests = Channel<Unit>(Channel.CONFLATED)
 
     /**
-     * Asks the activity to request POST_NOTIFICATIONS (Android 13+): after sign-in and when on
-     * demand is chosen, since a woken session's notification and the "Sign in again"
-     * notification are otherwise invisible.
+     * Asks the activity to request POST_NOTIFICATIONS (Android 13+) after sign-in, since a woken
+     * session's notification and the "Sign in again" notification are otherwise invisible.
      */
     val notificationPermissionRequests: Flow<Unit> = _notificationPermissionRequests.receiveAsFlow()
 
@@ -180,17 +175,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         TunnelForegroundService.start(getApplication())
     }
 
-    /** Also leaves "Always connected" (see [TunnelForegroundService.stop]). */
+    /** Ends the current session; the next wake-up connects again. */
     fun disconnect() {
         TunnelForegroundService.stop(getApplication())
-    }
-
-    fun setConnectionMode(mode: ConnectionMode) {
-        if (mode == ConnectionMode.OnDemand) requestNotificationPermission()
-        if (graph.settings.mode.value == mode) return
-        graph.settings.setMode(mode)
-        graph.log.info("Connection mode: ${describe(mode)}")
-        graph.tunnel.onIdleSettingsChanged()
     }
 
     fun setIdleWindow(window: IdleWindow) {
@@ -209,7 +196,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             appVersion = appVersion,
             androidVersion = "${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})",
             device = LogReport.deviceName(Build.MANUFACTURER, Build.MODEL),
-            connectionMode = describe(connectionMode.value),
+            idleWindowMinutes = idleWindow.value.minutes,
             pushRegistered = wakeUpsReady.value,
         ),
         entries = logEntries.value,
@@ -242,25 +229,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /**
-     * Auto-connect only in "Always connected" mode; never on first launch (on demand is the
-     * default). Deferred until the process is in the foreground (see [autoConnectWhenForeground]).
-     */
-    fun autoConnectIfEnabled() {
-        viewModelScope.launch {
-            autoConnectWhenForeground(
-                credentialsLoaded = credentialsLoaded,
-                inForeground = ProcessLifecycleOwner.get().lifecycle.currentStateFlow
-                    .map { it.isAtLeast(Lifecycle.State.STARTED) },
-                shouldConnect = {
-                    graph.settings.alwaysConnected && credentials.value != null && environment.value.ankiReady &&
-                        !graph.tunnel.isRunning
-                },
-                connect = ::connect,
-            )
-        }
-    }
-
     private fun requestNotificationPermission() {
         if (!hasNotificationPermission(getApplication())) _notificationPermissionRequests.trySend(Unit)
     }
@@ -281,11 +249,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         "expired_token" -> "The sign-in code expired. Please try again."
         "access_denied" -> "Sign-in was declined."
         else -> "Sign-in failed: ${e.message}"
-    }
-
-    private fun describe(mode: ConnectionMode): String = when (mode) {
-        ConnectionMode.OnDemand -> "on demand"
-        ConnectionMode.Always -> "always connected"
     }
 
     companion object {

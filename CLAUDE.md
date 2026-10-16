@@ -25,8 +25,8 @@ see README); without it the google-services plugin is skipped and push is unavai
 app/src/main/java/ai/ankimcp/ankidroid/
   AnkiMcpApp.kt, AppGraph.kt   manual DI; AppGraph owns the long-lived objects
   config/      AppConfig (BuildConfig.TUNNEL_URL, version)
-  settings/    ConnectionSettings (ConnectionMode OnDemand/Always, IdleWindow 15/30/60,
-               migrates the old keep_connected flag), FreezeNotice (persisted "phone froze us"
+  settings/    ConnectionSettings (IdleWindow 15/30/60; drops the old connection_mode and
+               keep_connected keys, D50), FreezeNotice (persisted "phone froze us"
                flag), KeyValueStore (SharedPreferences seam)
   auth/        DeviceFlowClient, Credentials, CredentialStore (Keystore AES-GCM), TokenRefresher
   tunnel/      Protocol (messages, close codes), TunnelClient (OkHttp WS, one connection,
@@ -41,7 +41,7 @@ app/src/main/java/ai/ankimcp/ankidroid/
   anki/        FlashCardsContract (vendored, keep header), AnkiProvider (ContentResolver seam),
                AnkiDroidRepository, AnkiDroidAvailability
   tools/       ListDecksTool
-  service/     TunnelForegroundService (specialUse FGS), BootReceiver, NetworkMonitor,
+  service/     TunnelForegroundService (specialUse FGS), NetworkMonitor,
                ScreenMonitor (screen off/on broadcasts), FreezingOem (OEM skins that freeze apps),
                AndroidWakeSupport (elapsedRealtime, uptime, wake locks, while-idle alarms + receiver),
                SignInNotifications ("Sign in again" notification), NotificationPermission

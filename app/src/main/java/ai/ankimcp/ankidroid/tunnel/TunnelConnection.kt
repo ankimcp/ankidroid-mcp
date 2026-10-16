@@ -33,21 +33,17 @@ sealed interface TunnelState {
 
     data class Connected(val url: String) : TunnelState
 
-    /**
-     * Waiting [delayMs] before the next attempt. [persistent] means the normal attempt budget is
-     * used up and "Always connected" keeps retrying at the maximum delay.
-     */
+    /** Waiting [delayMs] before the next attempt. */
     data class Reconnecting(
         val attempt: Int,
         val delayMs: Long,
         val lastError: String,
-        val persistent: Boolean = false,
     ) : TunnelState
 
     /**
      * Stopped for good until the user connects again (or a push wake-up arrives).
-     * [idleTimeout] means the on-demand idle window passed without a request. [phoneAsleep] means
-     * the on-demand session ended because the screen turned off or the app was frozen.
+     * [idleTimeout] means the idle window passed without a request. [phoneAsleep] means the
+     * session ended because the screen turned off or the app was frozen.
      * [signedOut] (with [reloginRequired]) means there were no credentials at all, e.g. after a
      * deliberate sign-out, as opposed to a session that expired or was revoked.
      */
@@ -83,7 +79,6 @@ fun interface TunnelSessionFactory {
  *  - a close code received during the handshake follows the close-code policy;
  *  - one immediate retry after an auth-close refresh, then normal backoff, so a server that
  *    keeps rejecting fresh tokens cannot cause a tight loop;
- *  - with [keepRetrying] on, it keeps retrying at the maximum delay instead of giving up;
  *  - the CPU is kept awake (wake locks) during short backoffs and connection attempts; longer
  *    backoffs and liveness checks are woken up by [wakeups] (an alarm) so they still happen in
  *    Doze;
@@ -92,11 +87,11 @@ fun interface TunnelSessionFactory {
  *    deadline while the CPU is awake and an [idleWakeups] alarm catches it in Doze;
  *  - when the stored credentials are cleared by someone else (sign-out), the run stops as
  *    "Not signed in";
- *  - while the idle timer is enabled (on demand with working wake-ups), the run also stops when
+ *  - while the idle timer is enabled (wake-ups registered), the run also stops when
  *    the screen turns off ([onScreenOff]) or when a tick on [uptimeClock] comes much later than
  *    scheduled, i.e. the OS froze the process;
  *  - a push wake-up while it looks connected drops the socket and reconnects ([onPushWake]);
- *  - in on-demand mode, a run started or revived by a push wake-up with the screen off holds a
+ *  - a run started or revived by a push wake-up with the screen off holds a
  *    `wake-window` wake lock while Claude is using it, because OEM freezers stop the process the
  *    moment its last wake lock is released (D49).
  */
@@ -108,7 +103,6 @@ class TunnelConnection(
     private val policy: ReconnectPolicy,
     private val networkAvailable: StateFlow<Boolean>,
     private val log: TunnelLog,
-    private val keepRetrying: () -> Boolean = { false },
     private val wakeLocks: WakeLocks = WakeLocks.None,
     private val wakeups: WakeupScheduler = WakeupScheduler.None,
     private val clock: Clock = Clock.systemUTC(),
@@ -282,7 +276,7 @@ class TunnelConnection(
     }
 
     /**
-     * The screen turned off. An on-demand session that a wake-up can bring back ends, like an
+     * The screen turned off. A session that a wake-up can bring back ends, like an
      * idle timeout: OEM freezers stop the process soon after, and a frozen socket only looks
      * alive to the relay. Requests in flight may finish first, for up to the 25 s request budget,
      * under a wake lock. Nothing reconnects when the screen turns on again (D41), but turning it
@@ -370,7 +364,6 @@ class TunnelConnection(
             lastActivityMs = elapsedClock.elapsedMs()
             lastActivityWasRequest = false
             armIdleLocked(generation)
-            if (keepRetrying()) releaseWakeWindowLocked("always connected")
         }
     }
 
@@ -489,17 +482,13 @@ class TunnelConnection(
                 }
             }
 
-            val persistent = policy.isExhausted(attempt)
-            if (persistent && !keepRetrying()) {
-                return TunnelState.Stopped(0, "Max reconnection attempts (${policy.maxAttempts}) exhausted")
+            if (policy.isExhausted(attempt)) {
+                log.warn("Gave up after ${policy.maxAttempts} failed connection attempts")
+                return TunnelState.Stopped(0, "Couldn't reach the AnkiMCP server. Claude's next request will try again.")
             }
-            val delayMs = if (persistent) policy.maxDelayMs else policy.delayFor(attempt)
-            if (persistent) {
-                log.info("Always connected: retrying in ${delayMs / 1000}s (attempt $attempt)")
-            } else {
-                log.info("Reconnecting in ${delayMs / 1000.0}s (attempt $attempt/${policy.maxAttempts})")
-            }
-            publish(gen, TunnelState.Reconnecting(attempt, delayMs, lastError, persistent))
+            val delayMs = policy.delayFor(attempt)
+            log.info("Reconnecting in ${delayMs / 1000.0}s (attempt $attempt/${policy.maxAttempts})")
+            publish(gen, TunnelState.Reconnecting(attempt, delayMs, lastError))
             waitBeforeRetry(gen, delayMs)
         }
     }
@@ -711,12 +700,12 @@ class TunnelConnection(
     }
 
     /**
-     * Opens (or extends) the wake window of run [gen]: on demand only, and only with the screen
-     * off, where an OEM freezer would otherwise stop the process between Claude's requests. A
+     * Opens (or extends) the wake window of run [gen], only with the screen off, where an OEM
+     * freezer would otherwise stop the process between Claude's requests. A
      * wake-up into an open window only restarts the grace period.
      */
     private fun openWakeWindowLocked(gen: Long) {
-        if (gen != generation || keepRetrying() || isScreenOn()) return
+        if (gen != generation || isScreenOn()) return
         if (wakeWindowLock == null) {
             val cap = renewWakeWindowCapLocked()
             log.debug("Wake window opened (screen off, at most ${formatDuration(cap)} without a request)")
@@ -777,9 +766,9 @@ class TunnelConnection(
     }
 
     /**
-     * [onFrozen] (the battery note) is skipped for the expected on-demand case: a session that
-     * would end on a freeze anyway, frozen while the screen was off. A freeze in a session that
-     * stays up (always connected, or no wake-ups), or one with the screen on, is reported.
+     * [onFrozen] (the battery note) is skipped for the expected case: a session that ends on a
+     * freeze anyway, frozen while the screen was off. A freeze in a session that stays up (no
+     * wake-ups, so a manual session), or one with the screen on, is reported.
      */
     private fun onFreezeDetected(gen: Long, watch: Long, frozenMs: Long, screenOffDuringFreeze: Boolean) {
         val endSession = synchronized(lock) {

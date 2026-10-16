@@ -11,7 +11,7 @@ data class LogReportHeader(
     /** e.g. "16 (API 36)". */
     val androidVersion: String,
     val device: String,
-    val connectionMode: String,
+    val idleWindowMinutes: Int,
     val pushRegistered: Boolean,
 )
 
@@ -31,7 +31,7 @@ object LogReport {
         val text = buildString {
             appendLine("AnkiDroid MCP ${header.appVersion}")
             appendLine("Android ${header.androidVersion}, ${header.device}")
-            appendLine("Connection mode: ${header.connectionMode}")
+            appendLine("Idle window: ${header.idleWindowMinutes} min")
             appendLine("Push wake-ups registered: ${if (header.pushRegistered) "yes" else "no"}")
             val offset = utcOffset(timeZone, entries.lastOrNull()?.timestampMs ?: 0L)
             appendLine("Log: ${entries.size} entries, oldest first, times in UTC$offset")

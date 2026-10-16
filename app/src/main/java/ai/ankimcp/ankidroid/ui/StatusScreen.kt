@@ -5,7 +5,6 @@ import ai.ankimcp.ankidroid.auth.UserInfo
 import ai.ankimcp.ankidroid.push.PushRegistrationState
 import ai.ankimcp.ankidroid.service.FreezingOem
 import ai.ankimcp.ankidroid.service.TunnelForegroundService
-import ai.ankimcp.ankidroid.settings.ConnectionMode
 import ai.ankimcp.ankidroid.settings.IdleWindow
 import ai.ankimcp.ankidroid.tunnel.TunnelState
 import androidx.compose.foundation.background
@@ -18,7 +17,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.Button
@@ -29,7 +27,6 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -44,20 +41,18 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLocale
 import androidx.compose.ui.res.painterResource
-import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
 import java.text.DateFormat
 import java.util.Date
 
-/** Connection mode, idle window and push registration, as shown on the Status screen. */
+/** Idle window and push registration, as shown on the Status screen. */
 data class ConnectionUi(
-    val mode: ConnectionMode,
     val idleWindow: IdleWindow,
     val pushAvailable: Boolean,
     val pushState: PushRegistrationState,
-    /** Wake-ups can reach the phone (the current token is registered), so on-demand sessions end when idle. */
+    /** Wake-ups can reach the phone (the current token is registered), so sessions end when idle. */
     val wakeUpsReady: Boolean,
     /** Wall-clock millis of the next idle disconnect, or null when no idle timer runs. */
     val idleDisconnectAt: Long?,
@@ -97,7 +92,6 @@ fun StatusScreen(
     signingOut: Boolean,
     onConnect: () -> Unit,
     onDisconnect: () -> Unit,
-    onModeChange: (ConnectionMode) -> Unit,
     onIdleWindowChange: (IdleWindow) -> Unit,
     onDismissFreezeNotice: () -> Unit,
     onLogout: () -> Unit,
@@ -149,10 +143,9 @@ fun StatusScreen(
         }
 
         item {
-            ConnectionModeCard(
+            ConnectionCard(
                 connection = connection,
                 formatDateTime = { dateTimeFormat.format(Date(it)) },
-                onModeChange = onModeChange,
                 onIdleWindowChange = onIdleWindowChange,
             )
         }
@@ -260,50 +253,25 @@ private fun TunnelCard(
 }
 
 @Composable
-private fun ConnectionModeCard(
+private fun ConnectionCard(
     connection: ConnectionUi,
     formatDateTime: (Long) -> String,
-    onModeChange: (ConnectionMode) -> Unit,
     onIdleWindowChange: (IdleWindow) -> Unit,
 ) {
-    val onDemand = connection.mode == ConnectionMode.OnDemand
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Connection", style = MaterialTheme.typography.titleMedium)
-            ModeOption(
-                selected = onDemand,
-                title = "On demand",
-                description = if (connection.wakeUpsReady) {
-                    "Claude wakes the phone when it needs your decks. Disconnects when the screen turns " +
-                        "off or after ${connection.idleWindow.minutes} min without requests, and does not " +
-                        "reconnect when you turn the screen on: Claude's next request wakes it again."
-                } else {
-                    "Push wake-ups are not available, so this works like a manual connection: tap " +
-                        "Connect, and it stays open until you disconnect."
-                },
-                onSelect = { onModeChange(ConnectionMode.OnDemand) },
-            )
-            if (onDemand) {
-                Column(Modifier.padding(start = 48.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text("Disconnect when idle for", style = MaterialTheme.typography.labelLarge)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        IdleWindow.entries.forEach { window ->
-                            FilterChip(
-                                selected = connection.idleWindow == window,
-                                onClick = { onIdleWindowChange(window) },
-                                label = { Text("${window.minutes} min") },
-                            )
-                        }
-                    }
+            SupportingText(describeConnection(connection))
+            Text("Disconnect when idle for", style = MaterialTheme.typography.labelLarge)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                IdleWindow.entries.forEach { window ->
+                    FilterChip(
+                        selected = connection.idleWindow == window,
+                        onClick = { onIdleWindowChange(window) },
+                        label = { Text("${window.minutes} min") },
+                    )
                 }
             }
-            ModeOption(
-                selected = !onDemand,
-                title = "Always connected",
-                description = "Reconnects when the app starts and after a reboot, and keeps retrying every " +
-                    "30 seconds. Uses more battery. Disconnect switches back to on demand.",
-                onSelect = { onModeChange(ConnectionMode.Always) },
-            )
             val (pushText, pushError) = describePush(connection, formatDateTime)
             Text(
                 pushText,
@@ -314,22 +282,15 @@ private fun ConnectionModeCard(
     }
 }
 
-@Composable
-private fun ModeOption(selected: Boolean, title: String, description: String, onSelect: () -> Unit) {
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .selectable(selected = selected, onClick = onSelect, role = Role.RadioButton)
-            .padding(vertical = 4.dp),
-        verticalAlignment = Alignment.Top,
-    ) {
-        RadioButton(selected = selected, onClick = null, modifier = Modifier.padding(top = 2.dp, start = 12.dp, end = 12.dp))
-        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text(title, style = MaterialTheme.typography.bodyLarge)
-            SupportingText(description)
-        }
+/** The one-line explanation on the Connection card. */
+internal fun describeConnection(connection: ConnectionUi): String =
+    if (connection.wakeUpsReady) {
+        "Claude wakes your phone when it needs your decks; the connection closes when the screen turns " +
+            "off or after ${connection.idleWindow.minutes} min without requests."
+    } else {
+        "Push wake-ups are not available, so this works like a manual connection: tap Connect, and it " +
+            "stays open until you disconnect."
     }
-}
 
 @Composable
 internal fun SupportingText(text: String, modifier: Modifier = Modifier) {

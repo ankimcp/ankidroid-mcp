@@ -1,6 +1,5 @@
 First release.
 - Lets Claude read your AnkiDroid decks through your AnkiMCP account. One read-only tool for now: deck names and today's due counts.
-- On demand mode: Claude wakes the phone when it needs it, and the app disconnects when the screen turns off or after 15-60 idle minutes.
-- Always connected mode keeps the tunnel open (uses more battery).
+- Claude wakes the phone when it needs it, and the app disconnects when the screen turns off or after 15-60 idle minutes.
 - Battery tips for Realme, Oppo, OnePlus, Xiaomi, Vivo and Huawei phones.
 - Share log button for bug reports.
