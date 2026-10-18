@@ -29,7 +29,7 @@ object LogReport {
     ): String {
         val time = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).apply { this.timeZone = timeZone }
         val text = buildString {
-            appendLine("AnkiDroid MCP ${header.appVersion}")
+            appendLine("AnkiMCP ${header.appVersion}")
             appendLine("Android ${header.androidVersion}, ${header.device}")
             appendLine("Idle window: ${header.idleWindowMinutes} min")
             appendLine("Push wake-ups registered: ${if (header.pushRegistered) "yes" else "no"}")
@@ -52,6 +52,7 @@ object LogReport {
         var out = text
         secrets.filter { it.length >= MIN_SECRET_LENGTH }.forEach { out = out.replace(it, REDACTED, ignoreCase = true) }
         out = BEARER.replace(out) { "${it.groupValues[1]} $REDACTED" }
+        out = AUTH_HEADER.replace(out) { "${it.groupValues[1]}${it.groupValues[2]}$REDACTED" }
         out = KEY_VALUE.replace(out) { match ->
             val (key, separator, value) = match.destructured
             if (value.length >= 8 || value.any(Char::isDigit)) "$key$separator$REDACTED" else match.value
@@ -61,6 +62,7 @@ object LogReport {
         out = EMAIL.replace(out, REDACTED_EMAIL)
         out = LONG_BASE64.replace(out, REDACTED)
         out = LONG_TOKEN.replace(out, REDACTED)
+        out = LONG_TOKEN_NO_DIGIT.replace(out) { if (CAMEL_CASE.matches(it.value)) it.value else REDACTED }
         return out
     }
 
@@ -79,6 +81,14 @@ object LogReport {
     private const val MIN_SECRET_LENGTH = 3
 
     private val BEARER = Regex("""(?i)\b(bearer)\s+[A-Za-z0-9._~+/=-]+""")
+
+    // Any other credential header (Basic, a raw key, cookies), e.g. in a logcat dump, also
+    // JSON-quoted ("Authorization":"Basic ..."): the rest of the line goes. A Bearer value is
+    // already "Bearer [redacted]" and is left as it is.
+    private val AUTH_HEADER = Regex(
+        """(?i)\b((?:proxy-)?authorization|(?:set-)?cookie|x-api-key)(["']?\s*[:=]\s*)""" +
+            """(?!["']?bearer \[redacted\])(?!["']?\[redacted\])\S[^\r\n]*""",
+    )
     // The value is redacted only if it has 8+ characters or a digit, so "Invalid token: expired" stays readable.
     private val KEY_VALUE = Regex(
         """(?i)\b(access_token|refresh_token|id_token|device_code|token|password|secret|api_key)(["']?\s*[:=]\s*["']?)([^\s"',;&]+)""",
@@ -99,4 +109,11 @@ object LogReport {
 
     // 32+ base64url characters with at least one digit: opaque tokens and FCM token halves, not words.
     private val LONG_TOKEN = Regex("""(?<![A-Za-z0-9_-])(?=[A-Za-z_-]*[0-9])[A-Za-z0-9_-]{32,}(?![A-Za-z0-9_-])""")
+
+    // 40+ base64url characters mixing upper and lower case, digit or not: a 32-byte token
+    // (43 characters, like the local server's) has no digit about one time in 20. A CamelCase
+    // identifier (an exception class name) is left alone.
+    private val LONG_TOKEN_NO_DIGIT =
+        Regex("""(?<![A-Za-z0-9_-])(?=[A-Za-z0-9_-]*[a-z])(?=[A-Za-z0-9_-]*[A-Z])[A-Za-z0-9_-]{40,}(?![A-Za-z0-9_-])""")
+    private val CAMEL_CASE = Regex("""[a-z]*(?:[A-Z][a-z]+)+""")
 }

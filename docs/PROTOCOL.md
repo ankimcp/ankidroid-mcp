@@ -1,4 +1,4 @@
-# Tunnel wire protocol (as implemented by AnkiDroid MCP)
+# Tunnel wire protocol (as implemented by the AnkiMCP Android app)
 
 This is the protocol between the app and the AnkiMCP tunnel relay
 (`anki-mcp-saas/apps/tunnel`). It is meant to be byte-compatible with the desktop
@@ -6,10 +6,15 @@ add-on (`anki-mcp-server-addon/anki_mcp_server/tunnel/`). Everything below match
 add-on unless it is listed under [Deviations from the add-on](#deviations-from-the-add-on).
 The push wake-up and device registration (an app-only addition, no tunnel frames involved) are
 described in [Push wake-up and device registration](#push-wake-up-and-device-registration).
+The local Wi-Fi server (no relay, no account) is a separate transport for the same MCP server,
+described in [Local HTTP transport](#local-http-transport-wi-fi-no-relay); it is not part of
+the tunnel protocol.
 
 Code: `app/src/main/java/ai/ankimcp/ankidroid/tunnel/Protocol.kt`, `TunnelClient.kt`,
 `TunnelConnection.kt`, `ReconnectPolicy.kt`, `auth/DeviceFlowClient.kt`, `mcp/McpServer.kt`,
-`push/PushTokenRegistrar.kt`, `push/WakeHandler.kt`.
+`push/PushTokenRegistrar.kt`, `push/WakeHandler.kt`, `billing/BillingApi.kt`, and for the local
+server `local/`. Plans and Google Play purchases (HTTP only, no tunnel frames) are in
+[Plans and Google Play billing](#plans-and-google-play-billing).
 
 ## Endpoints
 
@@ -19,6 +24,8 @@ Code: `app/src/main/java/ai/ankimcp/ankidroid/tunnel/Protocol.kt`, `TunnelClient
 | Device code | `POST https://ankidroid.ankimcp.ai/auth/device` |
 | Token / refresh | `POST https://ankidroid.ankimcp.ai/auth/token` |
 | Push token | `PUT` / `DELETE https://ankidroid.ankimcp.ai/devices/push` |
+| Plan status | `GET https://ankidroid.ankimcp.ai/billing/status` |
+| Play purchase | `POST https://ankidroid.ankimcp.ai/billing/google-play/prepare`, `.../purchase` |
 | MCP URL for Claude | `https://ankidroid.ankimcp.ai/mcp` (sent by the relay in `tunnel_established`) |
 
 The app has its own relay deployment: `wss://ankidroid.ankimcp.ai` in production,
@@ -121,7 +128,8 @@ Each `request` is handled concurrently; pings are answered inline.
 | Handler threw | 500 | `{"jsonrpc":"2.0","id":null,"error":{"code":-32603,"message":"Internal error: ..."}}` |
 
 Headers are always `{"content-type":"application/json"}`. The relay itself answers GET/DELETE
-with 405, so in practice only POSTs arrive.
+with 405, so in practice only POSTs arrive. A `request` whose `requestId` was already received
+is answered from the first one instead of being run again (Deviations 17).
 
 ### Liveness
 
@@ -237,6 +245,85 @@ High-priority FCM **data** message (no `notification` payload):
   was revoked: no connection; a local notification "Sign in again to AnkiMCP" is posted.
 - Other `type` values are ignored; `reason` is only logged.
 
+## Plans and Google Play billing
+
+Not part of the tunnel protocol. Three HTTPS calls on the same base as `/devices/push`, each
+with `Authorization: Bearer <device-flow access token>` and the same auth handling: an
+expired access token is refreshed first; a 401 refreshes once and retries once; a second 401
+gives up. JSON responses. Code: `billing/BillingApi.kt`; decisions: docs/DECISIONS.md D62.
+
+### Plan status
+
+```
+GET /billing/status
+-> 200 {"tier":"free"|"plus"|"pro",
+        "status":"free"|"active"|"grace"|"canceled",
+        "provider":"none"|"google_play"|"polar"|"paddle"|"admin",
+        "currentPeriodEndsAt":"<ISO-8601 UTC>"|null,
+        "cancelAtPeriodEnd":true|false,
+        "productId":"<Play product id>"|null}
+```
+
+- `tier` free: `status` free, `provider` none, no period, no `productId` (a plan that expired
+  but was not downgraded by the hourly job yet also reads free).
+- `provider` admin: the granted tier, `status` active, no period, no `productId`.
+- `provider` google_play, polar, paddle (billed): `status` grace when past due (wins over
+  canceled), canceled when `cancelAtPeriodEnd` (still entitled until `currentPeriodEndsAt`),
+  otherwise active. Play's ON_HOLD, PAUSED and EXPIRED never appear (the server downgrades to
+  free). `productId` only for google_play, and only where Play billing is on.
+- Errors: 401 bad token, 500 when the user service is unreachable (no 503).
+
+The app reads it after sign-in, when it comes to the front signed in (at most once a minute),
+after a successful purchase, and on the Plan card's Refresh. Parsing is defensive: a missing
+`tier` is an error; an unknown `status` or `provider` parses as unknown (the card treats an
+unknown provider as managed on the web); a `currentPeriodEndsAt` that is null or does not
+parse is no date. The app also copies `tier` into the stored account so the account card's
+"Plan:" line matches until the next token refresh.
+
+### Prepare a purchase
+
+```
+POST /billing/google-play/prepare          (no body)
+-> 200 {"obfuscatedAccountId":"<64 hex>","mode":"new"|"replace"|"blocked","currentProductId":"<id>"?}
+```
+
+- `new`: no live Play subscription; buy either product.
+- `replace`: a live Play subscription (`currentProductId`); another product is a plan change.
+- `blocked`: the account is entitled through the web or an admin grant; no purchase.
+- The app passes `obfuscatedAccountId` to `BillingFlowParams.setObfuscatedAccountId`
+  unchanged; without it `/purchase` answers 403. A response whose id is not 64 hex characters
+  or whose `mode` is unknown is treated as an error.
+
+### Register a purchase
+
+```
+POST /billing/google-play/purchase
+{"purchaseToken":"<Play purchase token>"}
+-> 200 {"tier":"<tier>"}
+```
+
+The body has exactly that one field. Idempotent for the same token. The **server**
+acknowledges the purchase with Google; the app never calls `acknowledgePurchase`. Pending
+purchases are not sent (the server would apply nothing); the app sends them once Play reports
+them PURCHASED.
+
+| Response | Client action |
+|---|---|
+| 200 | remember the token as registered (SHA-256 only), show the tier, reload the status |
+| 401 | refresh once and retry once (as above) |
+| 400 | error on the card, not retried |
+| 403 `PURCHASE_NOT_OWNED` | "belongs to a different AnkiMCP account", not sent again in this process |
+| 409 `ALREADY_SUBSCRIBED` | "already has a subscription", and Google refunds the unacknowledged duplicate; not sent again in this process |
+| 503 | "purchases are switched off", not retried |
+| 429, 5xx, network error | retried after 2 s, 4 s, 8 s; then an error with Try again, and the next refresh sends it again |
+
+Restore: on every refresh (sign-in, the app coming to the front, Refresh, Try again), the app reads Play's
+active subscriptions (`queryPurchasesAsync`, SUBS) and sends every PURCHASED one of the two
+products that is not acknowledged yet or not registered from this install, after checking its
+`obfuscatedAccountId` against `/prepare`'s (another AnkiMCP account's purchase on the same
+Google account, or one without the id, is skipped and never sent; the listener applies the
+same check). This also picks up a purchase completed while the app was closed.
+
 ## MCP over the tunnel
 
 Stateless: each `request.body` is exactly one JSON-RPC 2.0 message; there is no
@@ -246,36 +333,111 @@ spec).
 
 | Method | Result |
 |---|---|
-| `initialize` | `protocolVersion` = the client's if it is one of `2024-11-05`, `2025-03-26`, `2025-06-18`, else `2025-06-18` (the latest supported); `capabilities: {tools: {}}`; `serverInfo: {name: "ankidroid-mcp", title, version}`; `instructions` |
+| `initialize` | `protocolVersion` = the client's if it is one of `2024-11-05`, `2025-03-26`, `2025-06-18`, else `2025-06-18` (the latest supported); `capabilities: {tools: {}, prompts: {}, resources: {}}`; `serverInfo: {name: "ankidroid-mcp", title, version}`; `instructions` |
 | `ping` | `{}` |
-| `tools/list` | `{tools: [{name, title, description, inputSchema, outputSchema?, annotations}]}`; `outputSchema` only for protocol >= `2025-06-18` |
+| `tools/list` | `{tools: [{name, title, description, inputSchema, outputSchema?, annotations}]}`; `outputSchema` only for protocol >= `2025-06-18` (only `list_decks` declares one) |
 | `tools/call` | `{content: [{type:"text",text}], structuredContent?, isError}`; `structuredContent` only for protocol >= `2025-06-18` |
-| `resources/list`, `resources/templates/list`, `prompts/list` | empty lists |
+| `prompts/list` | `{prompts: [{name, description, arguments: [{name, required: false}]}]}`: `review_session` (`deck_name`, `card_limit`, `review_style`) and `twenty_rules` (no arguments) |
+| `prompts/get` | `{description, messages: [{role: "user", content: {type: "text", text}}]}`; arguments are strings, `card_limit` must parse as an integer; `review_style` is `interactive` (default), `quick` or `voice`, anything else is treated as `interactive` |
+| `resources/list` | `{resources: [{name: "query_syntax", title: "Search Query Syntax", uri: "anki://query-syntax", description, mimeType: "text/plain"}]}` |
+| `resources/read` | `{contents: [{uri, mimeType: "text/plain", text}]}`; `text` is the add-on's query-syntax dict as JSON with a two-space indent |
+| `resources/templates/list` | empty list |
 | anything else | error -32601 |
 
 Errors: invalid JSON -32700; JSON array (batch) -32600; missing/invalid `jsonrpc`/`id`
--32600; non-object `params` or unknown tool -32602. Tool failures (AnkiDroid missing,
-permission missing, storage not configured, AnkiDroid not responding, timeouts, exceptions)
+-32600; non-object `params`, unknown tool, unknown prompt or an unusable prompt argument
+-32602; unknown resource URI -32002. Tool failures (AnkiDroid missing,
+permission missing, AnkiDroid older than 2.24, storage not configured, AnkiDroid not
+responding, timeouts, exceptions, argument errors, an argument the tool's schema does not list)
 are `tools/call` results with `isError: true` and a human-readable text, never JSON-RPC errors.
 
-### `list_decks`
+### Tools
 
-Input: `{}`. Output (`structuredContent` on protocol >= 2025-06-18, always also serialised
-into the text content), described by the tool's `outputSchema`:
+The tool set is the add-on's, limited to what AnkiDroid's ContentProvider can do (D57), plus a
+phone-only `sync` (D58). Reads: `list_decks`, `find_notes`, `notes_info`, `model_names`,
+`model_field_names`, `model_templates`, `model_styling`, `tag_list`, `filtered_deck_get_info`,
+`present_card`, `cards_stats`, `get_card_memory_state`, `get_fsrs_params`. Writes:
+`create_deck`, `add_note`, `add_notes`, `update_note_fields`, `update_notes`, `delete_notes`,
+`create_model`, `update_model_styling`, `update_model_templates`, `model_field_add`, `tag_add`,
+`tag_remove`, `tag_replace`, `tag_batch`, `card_bury`, `card_suspend`, `card_set_flag`
+(AnkiDroid 2.25+), `card_change_deck`, `get_due_cards` (its skip flags bury, and AnkiDroid's
+`schedule` query selects the deck), `rate_card`, `sync`; annotations as the add-on declares
+them. Batch writes take at most 20 notes or cards per call; a write call that has to stop
+part-way returns a tool error "Did N of M ... before stopping. Done: ... Not done: ... Reason:
+...". Every tool call has a 12 s budget for all its AnkiDroid calls; running out is a
+tool error starting "AnkiDroid is taking too long". Names, argument names,
+output keys, texts and error wording (`[code] message (hint: ...) (context: {...})`) are the
+add-on's; arguments AnkiDroid cannot honour are absent from the input schemas
+(`additionalProperties: false`, and an unlisted argument is a tool error), and output keys
+AnkiDroid cannot supply are omitted. Every tool except `list_decks` needs AnkiDroid 2.24.0 or
+newer and otherwise returns "This needs AnkiDroid 2.24 or newer; the phone has AnkiDroid X.
+Update AnkiDroid to 2.24 or newer, then try again." The per-tool differences are listed in
+docs/DECISIONS.md D57.
+
+`list_decks` example (`structuredContent` on protocol >= 2025-06-18, always also serialised
+into the text content), with `{"include_stats": true}`:
 
 ```json
 {
   "decks": [
-    {"id": 1, "name": "Default", "is_filtered": false, "counts": {"new": 20, "learn": 3, "review": 41}}
+    {"deck_id": 1, "name": "Default", "is_filtered": false,
+     "stats": {"new_count": 20, "learn_count": 3, "review_count": 41}}
   ],
-  "total": 1
+  "total": 1,
+  "summary": {"new_cards": 20, "learning_cards": 3, "review_cards": 41}
 }
 ```
 
-`counts` are AnkiDroid's due counts for today (`DECK_COUNTS` is `[learn, review, new]` on the
-wire and is reordered here). `counts` is omitted for a deck if AnkiDroid returned no or
-unparseable counts. Decks are sorted by name; the root node (id 0) is skipped. An empty
-collection adds `"message": "No decks found in AnkiDroid"`.
+`stats` are AnkiDroid's due counts for today (`DECK_COUNTS` is `[learn, review, new]` on the
+wire and is reordered here); AnkiDroid has no per-deck total, so `total_in_deck` and
+`summary.total_cards` are not returned. Without `include_stats` there is no `stats` and no
+`summary`. `stats` is omitted for a deck if AnkiDroid returned no or unparseable counts. Decks
+are sorted by name; the root node (id 0) is skipped. An empty collection returns
+`{"message": "No decks found in Anki", "decks": [], "total": 0}`.
+
+## Local HTTP transport (Wi-Fi, no relay)
+
+MCP Streamable HTTP (spec 2025-06-18, stateless), served by the phone itself when the user
+turns on the local server. Same `McpServer`, methods, tools and errors as
+[MCP over the tunnel](#mcp-over-the-tunnel). Code: `local/McpHttpAdapter.kt`,
+`local/NanoHttpServerEngine.kt`, `local/LocalServer.kt`, `service/WifiMonitor.kt`. Decisions:
+D53-D56.
+
+- Endpoint: `http://<phone's Wi-Fi IPv4>:<port>/mcp`, port 8765 by default (1024-65535).
+  Plain HTTP, no TLS. The socket is bound to the Wi-Fi address only (never `0.0.0.0`, never
+  mobile data or a VPN), and only to a private (10/8, 172.16/12, 192.168/16) or CGNAT
+  (100.64/10) address; it moves when the address or port changes. Without Wi-Fi, or on a
+  Wi-Fi that only hands out public addresses, there is no socket.
+- Every request, in this order:
+
+  | Check | Failure |
+  |---|---|
+  | `Host` is `<ip>:<port>` | 403 |
+  | `Origin` absent, or `http://<ip>:<port>` | 403 |
+  | only with "Require access token" on (off by default): `Authorization: Bearer <token>` (scheme case-insensitive) | 403, no `WWW-Authenticate` (MCP clients start OAuth discovery on any 401; same as the desktop add-on) |
+  | path is `/mcp` | 404 |
+  | method is `POST` | 405, `Allow: POST` (GET and DELETE included: no SSE stream, no sessions) |
+  | body has `Content-Length` (no chunked), at most 1 MiB | 411 / 413, connection closed |
+  | `Content-Type`, if present, is `application/json` | 415 |
+  | `Accept`, if present, admits `application/json` (`*/*`, `application/*`) | 406 |
+  | body is JSON | 400 with `{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"Parse error"}}` |
+  | `MCP-Protocol-Version`, if present and the method is not `initialize`, is `2024-11-05`, `2025-03-26` or `2025-06-18` | 400 |
+
+  The first three checks run on the headers before the body is read; a request they refuse
+  is answered without reading its body and the connection is closed. Every other failure
+  body is `{"jsonrpc":"2.0","id":null,"error":{"code":-32000,"message":"..."}}`.
+- Then the body (one JSON-RPC message) goes to `McpServer`: a request gets 200
+  `application/json` with the response (JSON-RPC errors included); a notification or a client
+  response gets 202 with no body. Over 25 s: 504 with error -32004 and the request's id. An
+  exception: 500 with -32603. No `Mcp-Session-Id` is sent; one sent by the client is ignored.
+  No SSE in either direction; batches get -32600 as on the tunnel.
+- Auth: open by default, so any client on the Wi-Fi that passes the Host/Origin checks is
+  served. With "Require access token" on, the token below is required on every request; the
+  switch applies from the next request, without a restart.
+- Token: 32 random bytes, base64url without padding (43 characters), generated on the phone
+  when "Require access token" is first turned on,
+  shown, copied and shared from the Status screen, regenerated on request (old token gets 403
+  at once). Never logged.
 
 ## Deviations from the add-on
 
@@ -303,17 +465,40 @@ collection adds `"message": "No decks found in AnkiDroid"`.
    until the deadline; the add-on aborts. Phones switch networks while the user is in the
    browser.
 6. **Credential clearing**: `invalid_grant` on refresh, 4002 and 4004 clear the stored
-   credentials and return the app to the sign-in screen. The add-on stops but keeps its file.
-   For `invalid_grant` the clear is a compare-and-set: credentials saved by a sign-in while
+   credentials and return the app to its signed-out state (Sign in on the Remote tab). The
+   add-on stops but keeps its file. For `invalid_grant` the clear is a compare-and-set: credentials saved by a sign-in while
    the failing refresh was in flight are kept.
 7. **Malformed JSON-RPC**: the add-on's in-memory transport raises on invalid JSON and the
    tunnel answers 500/-32603. This app answers 200 with a proper JSON-RPC error (-32700 for
    invalid JSON, -32600 for batches/invalid requests).
 8. **Unknown tool** returns JSON-RPC error -32602 (per MCP spec) rather than an `isError`
    result.
-9. **`list_decks` shape** differs from the add-on (`deck_id`/`stats.new_count` there,
-   `id`/`counts.new` here, no `include_stats` switch, no `total_in_deck`). See
-   docs/DECISIONS.md.
+9. **Tool set** (D57, replaces the earlier `id`/`counts` shape of `list_decks`): the add-on's
+   tools AnkiDroid can serve, with its names, argument names and output keys; unsupported
+   arguments are absent from the schemas (and rejected if sent), unavailable output keys are
+   omitted; 30 add-on tools are not offered at all; AnkiDroid 2.24.0+ is required for every
+   tool but `list_decks`. Tool texts are not prefixed with FastMCP's "Error executing tool
+   ...:" and structured results are compact JSON rather than FastMCP's indented text.
+   `cards_stats` pages at most 200 cards (add-on: 1000), `get_card_memory_state` takes at most
+   100 ids, batch writes at most 20 notes or cards (add-on: 100, configurable); card write tools
+   may add a `failed` list; `rate_card` takes no `time_taken` (0 ms is always sent), refuses a
+   second rating of a card that get_due_cards did not return again in between,
+   gives no `next_review` for review cards and none for day-learning cards, and gives learning
+   cards the real time until due; `get_due_cards` buries at most 5 cards per call and adds
+   `buried_card_ids`; `cards_stats` adds each card's `flag` on AnkiDroid 2.25; `add_notes` may
+   report `unknown` notes after an insert with no answer; `create_model`/`update_model_templates`
+   refuse templates that fail rslib 25.09's `check_templates` (unknown field on either side, no
+   field on a front, unbalanced conditionals, no `{{cloze:}}` on both sides of a cloze type's
+   first template, identical fronts without `{{Card}}`) and field text or names containing
+   U+001F are refused; a write whose
+   confirming read fails says it was accepted but unconfirmed, and a write is not sent with
+   under 3 s of the request's 12 s left; `sync` only posts a notification (no
+   `job_id`/`resolve`).
+   `twenty_rules` and the query-syntax resource match the add-on's text;
+   `review_session` is adapted for the phone (syncing happens in AnkiDroid, a warning against
+   repeated rate_card calls, no media skip flags: the voice style asks the user before
+   burying a card with media, no gui style); an unknown prompt or an unusable
+   prompt argument is -32602 and an unknown resource -32002 (FastMCP answers error code 0).
 10. **AnkiDroid provider timeout** is 20 s, inside the 25 s request budget, so a hung
     AnkiDroid produces a readable tool error instead of a 504.
 11. (Removed: the "Always connected" mode and its retry-every-30-s loop were dropped, D50.
@@ -337,6 +522,30 @@ collection adds `"message": "No decks found in AnkiDroid"`.
     has no such case.
 16. **Push wake-up while connected**: a wake-up that finds the tunnel looking connected drops
     the socket locally (`ws.cancel()`, nothing is sent on the wire; 1001 is only the local close
-    result) and reconnects at once, since the relay only sends one when it has no connection
-    for the account (D40). A connection that connected or got a `request` frame in the last
+    result) and reconnects at once, since the relay sends one only when it has no connection
+    for the account (D40) or, as a planned relay change, when a request forwarded to a connected
+    phone has no reply after about 3 s (stall wake), whose possible re-forward of that request
+    is covered by item 17. A connection that connected or got a `request` frame in the last
     10 s, or has a request in flight, is kept: the wake-up crossed it.
+17. **Request dedupe by `requestId`**: the app runs each `requestId` at most once per process
+    (docs/DECISIONS.md D52). The id is recorded when the `request` frame is received, before
+    the tool runs, and kept in memory for 2 min (on `elapsedRealtime`) or until 64 newer ids
+    push it out. A `request` with an id already in the table, on the same or a later
+    connection, is not run again unless the first one never started:
+    - the first one produced a response: that response is sent again unchanged (same
+      `requestId`, status, headers and body), even if it never left the old socket;
+    - the first one is still running: the duplicate waits for it (up to 25 s) and sends its
+      response;
+    - the first one was cancelled before its tool started (its socket was dropped right after
+      receipt): the id is claimed again and the copy runs as if it were the first;
+    - the first one was cut off before it had a response (its socket was dropped mid-run), or
+      the wait ran out: `statusCode` 200 with
+      `{"jsonrpc":"2.0","id":<inner id or null>,"error":{"code":-32001,"message":"The phone was interrupted while handling this request, so its result is unknown. Check AnkiDroid before repeating a change."}}`.
+
+    A duplicate holds the request wake lock and counts as a request in flight like any other.
+    Frames are unchanged. The app relies on the relay (1) re-forwarding a request that got no
+    reply, after its FCM wake (sent when a forwarded request has no reply after 3 s) and the
+    phone's reconnect, with the **same** `requestId`, and (2) accepting the reply from
+    whichever connection carries it, ignoring a second reply for an id it already answered.
+    A process restart empties the table, so a request cut off by process death can still run
+    twice (D52). The add-on has no dedupe.

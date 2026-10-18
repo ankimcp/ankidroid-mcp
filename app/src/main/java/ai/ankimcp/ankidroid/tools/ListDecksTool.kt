@@ -1,11 +1,10 @@
 package ai.ankimcp.ankidroid.tools
 
 import ai.ankimcp.ankidroid.anki.AnkiDroidRepository
-import ai.ankimcp.ankidroid.anki.AnkiResult
-import ai.ankimcp.ankidroid.mcp.Tool
 import ai.ankimcp.ankidroid.mcp.ToolResult
 import ai.ankimcp.ankidroid.mcp.readOnlyAnnotations
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
@@ -14,23 +13,26 @@ import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
 
 /**
- * `list_decks`, modelled on the add-on's tool of the same name. AnkiDroid's provider always
- * returns due counts, so there is no `include_stats` switch; `total_in_deck` is not available.
- *
- * Output: `{"decks": [{"id", "name", "is_filtered", "counts": {"new", "learn", "review"}}], "total"}`
+ * `list_decks`, the add-on's tool with its keys (D57). AnkiDroid's deck list has no per-deck
+ * total, so `stats.total_in_deck` and `summary.total_cards` are not returned. Works on every
+ * AnkiDroid version the app supports (no 2.24 gate).
  */
-class ListDecksTool(private val repository: AnkiDroidRepository) : Tool {
+class ListDecksTool(repository: AnkiDroidRepository) : AnkiTool(repository, needsToolSet = false) {
     override val name = "list_decks"
     override val title = "List Decks"
     override val description =
-        "List all available Anki decks in AnkiDroid on the user's phone, with per-deck due counts. " +
+        "List all available Anki decks, optionally with statistics. " +
             "Counts reflect the local collection at call time; this call does not sync with AnkiWeb. " +
-            "Returns deck objects with id, name, is_filtered, and counts (new, learn, review: cards due today)."
+            "Returns deck objects with deck_id, name, and is_filtered. With include_stats=true, adds per-deck " +
+            "card counts due today (new, learn, review; AnkiDroid does not report a per-deck total)."
 
-    override val inputSchema: JsonObject = buildJsonObject {
-        put("type", "object")
-        put("properties", JsonObject(emptyMap()))
-        put("additionalProperties", false)
+    override val inputSchema: JsonObject = inputSchema {
+        property(
+            "include_stats",
+            "boolean",
+            "Add per-deck card counts (new, learn, review)",
+            default = JsonPrimitive(false),
+        )
     }
 
     override val outputSchema: JsonObject = buildJsonObject {
@@ -41,32 +43,40 @@ class ListDecksTool(private val repository: AnkiDroidRepository) : Tool {
                 putJsonObject("items") {
                     put("type", "object")
                     putJsonObject("properties") {
-                        putJsonObject("id") { put("type", "integer") }
+                        putJsonObject("deck_id") { put("type", "integer") }
                         putJsonObject("name") { put("type", "string") }
                         putJsonObject("is_filtered") { put("type", "boolean") }
-                        putJsonObject("counts") {
+                        putJsonObject("stats") {
                             put("type", "object")
-                            put("description", "Cards due today; omitted if AnkiDroid returned no counts.")
+                            put("description", "Cards due today; only with include_stats, omitted if AnkiDroid returned no counts.")
                             putJsonObject("properties") {
-                                putJsonObject("new") { put("type", "integer") }
-                                putJsonObject("learn") { put("type", "integer") }
-                                putJsonObject("review") { put("type", "integer") }
+                                putJsonObject("new_count") { put("type", "integer") }
+                                putJsonObject("learn_count") { put("type", "integer") }
+                                putJsonObject("review_count") { put("type", "integer") }
                             }
                             putJsonArray("required") {
-                                add("new")
-                                add("learn")
-                                add("review")
+                                add("new_count")
+                                add("learn_count")
+                                add("review_count")
                             }
                         }
                     }
                     putJsonArray("required") {
-                        add("id")
+                        add("deck_id")
                         add("name")
                         add("is_filtered")
                     }
                 }
             }
             putJsonObject("total") { put("type", "integer") }
+            putJsonObject("summary") {
+                put("type", "object")
+                putJsonObject("properties") {
+                    putJsonObject("new_cards") { put("type", "integer") }
+                    putJsonObject("learning_cards") { put("type", "integer") }
+                    putJsonObject("review_cards") { put("type", "integer") }
+                }
+            }
             putJsonObject("message") { put("type", "string") }
         }
         putJsonArray("required") {
@@ -77,41 +87,55 @@ class ListDecksTool(private val repository: AnkiDroidRepository) : Tool {
 
     override val annotations: JsonObject = readOnlyAnnotations(title)
 
-    override suspend fun call(arguments: JsonObject): ToolResult =
-        when (val result = repository.listDecks()) {
-            is AnkiResult.Failure -> ToolResult.error(result.message)
-            is AnkiResult.Success -> {
-                val decks = result.value.sortedBy { it.name.lowercase() }
-                ToolResult.structured(
+    override suspend fun run(args: ToolArgs): ToolResult {
+        val includeStats = args.bool("include_stats", false)
+        val decks = repository.listDecks(minVersion = null).valueOr { return it }.sortedBy { it.name.lowercase() }
+        if (decks.isEmpty()) {
+            return ToolResult.structured(
+                buildJsonObject {
+                    put("message", "No decks found in Anki")
+                    put("decks", buildJsonArray {})
+                    put("total", 0)
+                },
+            )
+        }
+        var newCards = 0L
+        var learningCards = 0L
+        var reviewCards = 0L
+        val items = buildJsonArray {
+            decks.forEach { deck ->
+                add(
                     buildJsonObject {
-                        put(
-                            "decks",
-                            buildJsonArray {
-                                decks.forEach { deck ->
-                                    add(
-                                        buildJsonObject {
-                                            put("id", deck.id)
-                                            put("name", deck.name)
-                                            put("is_filtered", deck.isFiltered)
-                                            deck.counts?.let { counts ->
-                                                put(
-                                                    "counts",
-                                                    buildJsonObject {
-                                                        put("new", counts.new)
-                                                        put("learn", counts.learn)
-                                                        put("review", counts.review)
-                                                    },
-                                                )
-                                            }
-                                        },
-                                    )
-                                }
-                            },
-                        )
-                        put("total", decks.size)
-                        if (decks.isEmpty()) put("message", "No decks found in AnkiDroid")
+                        put("deck_id", deck.id)
+                        put("name", deck.name)
+                        put("is_filtered", deck.isFiltered)
+                        val counts = deck.counts
+                        if (includeStats && counts != null) {
+                            putJsonObject("stats") {
+                                put("new_count", counts.new)
+                                put("learn_count", counts.learn)
+                                put("review_count", counts.review)
+                            }
+                            newCards += counts.new
+                            learningCards += counts.learn
+                            reviewCards += counts.review
+                        }
                     },
                 )
             }
         }
+        return ToolResult.structured(
+            buildJsonObject {
+                put("decks", items)
+                put("total", decks.size)
+                if (includeStats) {
+                    putJsonObject("summary") {
+                        put("new_cards", newCards)
+                        put("learning_cards", learningCards)
+                        put("review_cards", reviewCards)
+                    }
+                }
+            },
+        )
+    }
 }

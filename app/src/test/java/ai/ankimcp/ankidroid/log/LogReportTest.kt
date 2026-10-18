@@ -31,7 +31,7 @@ class LogReportTest {
 
         assertEquals(
             """
-            AnkiDroid MCP 0.1.0
+            AnkiMCP 0.1.0
             Android 16 (API 36), Google Pixel 8
             Idle window: 30 min
             Push wake-ups registered: yes
@@ -63,7 +63,7 @@ class LogReportTest {
     fun `empty log still has the header`() {
         val text = LogReport.format(header, emptyList(), timeZone = utc)
 
-        assertTrue(text.startsWith("AnkiDroid MCP 0.1.0\n"))
+        assertTrue(text.startsWith("AnkiMCP 0.1.0\n"))
         assertTrue(text.contains("Log: 0 entries"))
     }
 
@@ -99,6 +99,41 @@ class LogReportTest {
         assertEquals("{\"access_token\": \"[redacted]\"}", LogReport.redact("{\"access_token\": \"abc123\"}"))
         assertEquals("token: [redacted]", LogReport.redact("token: s3krit"))
         assertEquals("password=[redacted]", LogReport.redact("password=longenough"))
+    }
+
+    @Test
+    fun `redacts other credential headers to the end of the line`() {
+        assertEquals("Authorization: [redacted]", LogReport.redact("Authorization: Basic dXNlcjpwYXNz"))
+        assertEquals("Proxy-Authorization: [redacted]", LogReport.redact("Proxy-Authorization: Digest x=1"))
+        assertEquals("Cookie: [redacted]\nnext", LogReport.redact("Cookie: a=1; b=2\nnext"))
+        assertEquals("x-api-key=[redacted]", LogReport.redact("x-api-key=abc"))
+        assertEquals("Authorization: Bearer [redacted] sent", LogReport.redact("Authorization: Bearer t0k sent"))
+    }
+
+    @Test
+    fun `redacts JSON-quoted credential headers`() {
+        assertEquals("""{"Authorization":[redacted]""", LogReport.redact("""{"Authorization":"Basic dXNlcjpwYXNz"}"""))
+        assertEquals("""headers {'cookie': [redacted]""", LogReport.redact("""headers {'cookie': 'sid=abc; x=1'}"""))
+        assertEquals(
+            """{"Authorization":"Bearer [redacted]"}""",
+            LogReport.redact("""{"Authorization":"Bearer abc.def-123"}"""),
+        )
+    }
+
+    @Test
+    fun `redacts a 43-character base64url token without a digit`() {
+        val token = "aBcDeFgHiJkLmNoPqRsTuVwXyZ_aBcDeFgHiJkLmNoP"
+        assertEquals(43, token.length)
+
+        assertEquals("token [redacted] end", LogReport.redact("token $token end"))
+        assertEquals("[redacted]", LogReport.redact("qwertyQWERTYasdfghASDFGHzxcvbnZXCVBNpoiuyt"))
+    }
+
+    @Test
+    fun `long CamelCase class names stay readable`() {
+        val line = "Failed: ForegroundServiceStartNotAllowedExceptionWrapperForTests"
+
+        assertEquals(line, LogReport.redact(line))
     }
 
     @Test

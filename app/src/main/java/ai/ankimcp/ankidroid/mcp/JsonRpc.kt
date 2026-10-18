@@ -15,6 +15,9 @@ object JsonRpcErrors {
     const val INVALID_PARAMS = -32602
     const val INTERNAL_ERROR = -32603
 
+    /** MCP: `resources/read` for a URI the server does not have. */
+    const val RESOURCE_NOT_FOUND = -32002
+
     /** Relay convention for request timeouts (paired with HTTP 504). */
     const val REQUEST_TIMEOUT = -32004
 }

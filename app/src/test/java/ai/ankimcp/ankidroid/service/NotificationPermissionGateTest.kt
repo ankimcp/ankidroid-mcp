@@ -25,6 +25,17 @@ class NotificationPermissionGateTest {
     }
 
     @Test
+    fun `the sync request learns why its notification would not be seen`() {
+        val importances = mapOf(NotificationChannels.SYNC to NotificationManagerCompat.IMPORTANCE_NONE)
+        assertEquals(
+            "This notification category is off",
+            gate(importances = importances).blockReason("\"Tap to sync AnkiDroid\" notification", NotificationChannels.SYNC),
+        )
+        assertNull(gate().blockReason("\"Tap to sync AnkiDroid\" notification", NotificationChannels.SYNC))
+        assertFalse(NotificationChannels.SYNC in NotificationChannels.ALL)
+    }
+
+    @Test
     fun `with everything on nothing is logged`() {
         val importances = mapOf(NotificationChannels.TUNNEL to NotificationManagerCompat.IMPORTANCE_LOW)
 

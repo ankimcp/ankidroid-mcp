@@ -8,7 +8,7 @@ import org.junit.Test
 
 class SessionEndedReasonTest {
     @Test
-    fun `an expired or revoked session is explained on the sign-in screen`() {
+    fun `an expired or revoked session is explained on the sign-in card`() {
         val expired = TunnelState.Stopped(0, "Session expired, please sign in again", reloginRequired = true)
 
         assertEquals("Session expired, please sign in again", sessionEndedReason(expired))

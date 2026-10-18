@@ -8,7 +8,11 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Asked only when the local Wi-Fi server is on: that mode has no push wake-up (D56). -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="com.ichi2.anki.permission.READ_WRITE_DATABASE" />
+    <!-- Google Play subscriptions (D62). The billing library declares it too; explicit for review. -->
+    <uses-permission android:name="com.android.vending.BILLING" />
 
     <queries>
         <package android:name="com.ichi2.anki" />
@@ -44,7 +48,7 @@
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Keeps an outbound WebSocket to the AnkiMCP relay open so that an AI assistant chosen by the user (e.g. Claude) can read the user's local AnkiDroid flashcard collection on request. Started when the user taps Connect, or by a high-priority push message that the AnkiMCP server sends when the user's assistant makes a request. Shows a persistent notification with a Disconnect action, and stops when the user disconnects; when push wake-ups are set up, it also stops when the screen turns off or after a user-chosen idle period (15 to 60 minutes) without requests." />
+                android:value="Keeps an outbound WebSocket to the AnkiMCP relay open so that an AI assistant chosen by the user (e.g. Claude) can read the user's local AnkiDroid flashcard collection on request. Started when the user taps Connect, or by a high-priority push message that the AnkiMCP server sends when the user's assistant makes a request. Shows a persistent notification with a Disconnect action, and stops when the user disconnects; when push wake-ups are set up, it also stops when the screen turns off or after a user-chosen idle period (15 to 60 minutes) without requests. When the user turns on the local server, it also serves the same requests directly over HTTP on the phone's Wi-Fi address (no account, no relay) and keeps running until the user turns the local server off; the notification then shows the server's address and a Stop local server action." />
         </service>
 
         <!-- No FCM token before sign-in: PushCoordinator turns auto-init on after sign-in and off at logout (D39). -->
@@ -60,6 +64,17 @@
                 <action android:name="com.google.firebase.MESSAGING_EVENT" />
             </intent-filter>
         </service>
+
+        <!-- "Share detailed log" (D61): hands the one file in cacheDir/shared_logs/ to the app the user picks, read-only. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.logs"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
 
         <!-- Explicit-intent target of the reconnect/liveness and idle-deadline alarms (AlarmWakeupScheduler). -->
         <receiver

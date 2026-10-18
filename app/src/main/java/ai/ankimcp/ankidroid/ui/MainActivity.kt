@@ -1,6 +1,7 @@
 package ai.ankimcp.ankidroid.ui
 
 import ai.ankimcp.ankidroid.R
+import ai.ankimcp.ankidroid.billing.CurrentActivity
 import ai.ankimcp.ankidroid.tunnel.TunnelState
 import android.Manifest
 import android.os.Build
@@ -56,9 +57,19 @@ class MainActivity : ComponentActivity() {
             AnkiMcpTheme { AppRoot(viewModel) }
         }
     }
+
+    override fun onResume() {
+        super.onResume()
+        CurrentActivity.resumed(this)
+    }
+
+    override fun onDestroy() {
+        CurrentActivity.destroyed(this)
+        super.onDestroy()
+    }
 }
 
-/** Why the session ended, for the sign-in screen; nothing after a deliberate sign-out. */
+/** Why the session ended, for the sign-in card; nothing after a deliberate sign-out. */
 internal fun sessionEndedReason(state: TunnelState): String? =
     (state as? TunnelState.Stopped)?.takeIf { it.reloginRequired && !it.signedOut }?.reason
 
@@ -77,9 +88,29 @@ private fun AppRoot(viewModel: MainViewModel) {
     val signingOut by viewModel.signingOut.collectAsStateWithLifecycle()
     val freezeDetected by viewModel.freezeDetected.collectAsStateWithLifecycle()
     val logEntries by viewModel.logEntries.collectAsStateWithLifecycle()
+    val detailedLogging by viewModel.detailedLogging.collectAsStateWithLifecycle()
+    val detailedLoggingUntil by viewModel.detailedLoggingUntil.collectAsStateWithLifecycle()
+    val localEnabled by viewModel.localServerEnabled.collectAsStateWithLifecycle()
+    val localPort by viewModel.localServerPort.collectAsStateWithLifecycle()
+    val localState by viewModel.localServerState.collectAsStateWithLifecycle()
+    val localToken by viewModel.localServerToken.collectAsStateWithLifecycle()
+    val localTokenError by viewModel.localServerTokenError.collectAsStateWithLifecycle()
+    val localRequireToken by viewModel.localServerRequireToken.collectAsStateWithLifecycle()
+    val billing by viewModel.billing.collectAsStateWithLifecycle()
+    val localUi = LocalServerUi(
+        enabled = localEnabled,
+        port = localPort,
+        state = localState,
+        requireToken = localRequireToken,
+        token = localToken,
+        tokenError = localTokenError,
+    )
 
     LifecycleResumeEffect(Unit) {
         viewModel.refreshEnvironment()
+        viewModel.ensureLocalServer()
+        // Also picks up purchases completed while the app was closed (D62).
+        viewModel.refreshBilling()
         onPauseOrDispose { }
     }
 
@@ -122,11 +153,25 @@ private fun AppRoot(viewModel: MainViewModel) {
     }
     var tab by rememberSaveable { mutableStateOf(MainTab.Status) }
     val user = credentials?.user
-    val signedIn = environment.ankiReady && credentialsLoaded && user != null
+    // Past onboarding: the tabbed Status screen and the bottom bar, signed in or out.
+    val ready = environment.ankiReady && credentialsLoaded
+    LaunchedEffect(environment.ankiReady) { if (!environment.ankiReady) tab = MainTab.Status }
+    var statusTabs by rememberSaveable(stateSaver = StatusTabState.Saver) { mutableStateOf(StatusTabMemory.state) }
+    val updateStatusTabs = { next: StatusTabState ->
+        statusTabs = next
+        StatusTabMemory.state = next
+    }
+    val accountSignedIn = user != null
     // Not while credentials are still loading: after process death that would discard the restored tab.
-    val signedOut = !environment.ankiReady || (credentialsLoaded && user == null)
-    LaunchedEffect(signedOut) { if (signedOut) tab = MainTab.Status }
-    BackHandler(enabled = signedIn && tab != MainTab.Status) { tab = MainTab.Status }
+    LaunchedEffect(credentialsLoaded, accountSignedIn) {
+        if (!credentialsLoaded) return@LaunchedEffect
+        // App start: credentials are decrypted after the first resume, so the resume refresh saw no account.
+        if (accountSignedIn) viewModel.refreshBilling()
+        // A sign-out or an ended session goes to Status, where Remote shows the sign-in card.
+        if (statusTabs.isSignOut(accountSignedIn)) tab = MainTab.Status
+        updateStatusTabs(statusTabs.settle(accountSignedIn, localEnabled))
+    }
+    BackHandler(enabled = ready && tab != MainTab.Status) { tab = MainTab.Status }
 
     Scaffold(
         modifier = Modifier.fillMaxSize(),
@@ -135,13 +180,13 @@ private fun AppRoot(viewModel: MainViewModel) {
                 title = {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         OwlMark(size = 28.dp)
-                        Text("AnkiDroid MCP", Modifier.padding(start = 10.dp))
+                        Text("AnkiMCP", Modifier.padding(start = 10.dp))
                     }
                 },
             )
         },
         bottomBar = {
-            if (signedIn) {
+            if (ready) {
                 NavigationBar {
                     MainTab.entries.forEach { item ->
                         NavigationBarItem(
@@ -168,24 +213,22 @@ private fun AppRoot(viewModel: MainViewModel) {
             !credentialsLoaded -> Box(contentModifier, contentAlignment = Alignment.Center) {
                 CircularProgressIndicator()
             }
-            user == null -> SignInScreen(
-                state = signIn,
-                sessionEndedReason = sessionEndedReason(tunnelState),
-                onSignIn = viewModel::startSignIn,
-                onCancel = viewModel::cancelSignIn,
-                onOpenFailed = viewModel::failSignIn,
-                modifier = contentModifier,
-            )
             tab == MainTab.Log -> LogScreen(
                 entries = logEntries,
                 report = viewModel::logReport,
                 onClear = viewModel::clearLog,
+                detailedLogging = detailedLogging,
+                detailedLoggingUntil = detailedLoggingUntil,
+                onDetailedLoggingChange = viewModel::setDetailedLogging,
+                buildDetailedLog = viewModel::detailedLogFile,
                 onMessage = showMessage,
                 modifier = contentModifier,
             )
             tab == MainTab.About -> AboutScreen(appVersion = viewModel.appVersion, modifier = contentModifier)
             else -> StatusScreen(
                 user = user,
+                signIn = signIn,
+                sessionEndedReason = sessionEndedReason(tunnelState),
                 tunnelState = tunnelState,
                 defaultMcpUrl = viewModel.defaultMcpUrl,
                 connection = ConnectionUi(
@@ -195,18 +238,37 @@ private fun AppRoot(viewModel: MainViewModel) {
                     wakeUpsReady = wakeUpsReady,
                     idleDisconnectAt = idleDisconnectAt,
                 ),
+                plan = planCardUi(billing, userTier = user?.tier.orEmpty()),
                 battery = BatteryUi(
                     unrestricted = environment.batteryUnrestricted,
                     oem = viewModel.freezingOem,
                     freezeDetected = freezeDetected,
                 ),
+                local = localUi,
                 notificationsShown = environment.notificationsShown,
                 signingOut = signingOut,
+                selectedTab = statusTabs.selected(accountSignedIn, localEnabled),
+                onSelectTab = { picked -> updateStatusTabs(statusTabs.pick(picked, accountSignedIn)) },
                 onConnect = connect,
                 onDisconnect = viewModel::disconnect,
                 onIdleWindowChange = viewModel::setIdleWindow,
                 onDismissFreezeNotice = viewModel::dismissFreezeNotice,
                 onLogout = viewModel::logout,
+                onSignIn = viewModel::startSignIn,
+                onCancelSignIn = viewModel::cancelSignIn,
+                onSignInOpenFailed = viewModel::failSignIn,
+                onLocalEnabledChange = viewModel::setLocalServerEnabled,
+                onLocalPortChange = viewModel::setLocalServerPort,
+                onRegenerateLocalToken = viewModel::regenerateLocalServerToken,
+                onLocalRequireTokenChange = viewModel::setLocalServerRequireToken,
+                plans = remember(viewModel) {
+                    PlanCallbacks(
+                        onSubscribe = viewModel::subscribe,
+                        onRefresh = { viewModel.refreshBilling(force = true) },
+                        onRetry = viewModel::retryBilling,
+                        onDismiss = viewModel::dismissBillingMessage,
+                    )
+                },
                 onMessage = showMessage,
                 modifier = contentModifier,
             )

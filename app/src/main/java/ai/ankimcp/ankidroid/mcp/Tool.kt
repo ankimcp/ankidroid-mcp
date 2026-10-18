@@ -70,6 +70,24 @@ fun readOnlyAnnotations(title: String): JsonObject = buildJsonObject {
     put("openWorldHint", false)
 }
 
+/**
+ * Annotations for tools that change the collection, as the add-on builds them
+ * (`_build_tool_annotations`): [destructive] is false only for purely additive tools, and
+ * [idempotent] is omitted when null (MCP then assumes false).
+ */
+fun writeAnnotations(
+    title: String,
+    destructive: Boolean = true,
+    idempotent: Boolean? = null,
+    openWorld: Boolean = false,
+): JsonObject = buildJsonObject {
+    put("title", title)
+    put("readOnlyHint", false)
+    put("destructiveHint", destructive)
+    if (idempotent != null) put("idempotentHint", idempotent)
+    put("openWorldHint", openWorld)
+}
+
 class ToolRegistry(tools: List<Tool>) {
     private val byName: Map<String, Tool> = tools.associateBy { it.name }.also {
         require(it.size == tools.size) { "Duplicate tool names" }

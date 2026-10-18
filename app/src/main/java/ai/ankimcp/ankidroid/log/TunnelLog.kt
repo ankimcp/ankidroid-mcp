@@ -14,16 +14,23 @@ data class LogEntry(
     enum class Level { DEBUG, INFO, WARN, ERROR }
 }
 
+/** A second destination for every [TunnelLog] entry. Called under the log's lock: must not block. */
+fun interface LogSink {
+    fun append(entry: LogEntry)
+}
+
 /**
- * Fixed-size ring buffer of recent tunnel events, shown on the Log tab.
+ * Fixed-size ring buffer of recent tunnel events, shown on the Log tab, and the single entry
+ * point for the app's log: every entry also goes to [sinks] (the rotating file log, D61).
  *
  * Never pass tokens or other secrets to this log: it is rendered verbatim in the UI,
- * mirrored to logcat and shared by the user (redacted, see [LogReport]).
+ * mirrored to logcat, written to the file log and shared by the user (redacted, see [LogReport]).
  */
 class TunnelLog(
     private val capacity: Int = DEFAULT_CAPACITY,
     private val clock: () -> Long = System::currentTimeMillis,
     private val mirrorToLogcat: Boolean = true,
+    private val sinks: List<LogSink> = emptyList(),
 ) {
     private val buffer = ArrayDeque<LogEntry>(capacity)
     private val _entries = MutableStateFlow<List<LogEntry>>(emptyList())
@@ -57,9 +64,12 @@ class TunnelLog(
             Log.println(priority, TAG, message)
         }
         synchronized(buffer) {
+            val entry = LogEntry(clock(), level, message)
             if (buffer.size == capacity) buffer.removeFirst()
-            buffer.addLast(LogEntry(clock(), level, message))
+            buffer.addLast(entry)
             _entries.value = buffer.toList()
+            // Inside the lock so the file keeps the buffer's order.
+            sinks.forEach { it.append(entry) }
         }
     }
 

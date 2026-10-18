@@ -1,5 +1,6 @@
 package ai.ankimcp.ankidroid.ui
 
+import ai.ankimcp.ankidroid.R
 import ai.ankimcp.ankidroid.anki.AnkiDroidAvailability
 import ai.ankimcp.ankidroid.service.FreezingOem
 import android.content.ActivityNotFoundException
@@ -21,15 +22,14 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 
 @Composable
@@ -51,11 +51,8 @@ fun OnboardingScreen(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        Text("Set up AnkiDroid MCP", style = MaterialTheme.typography.headlineSmall)
-        Text(
-            "This app lets an AI assistant such as Claude read your AnkiDroid decks while your phone is " +
-                "connected. It needs AnkiDroid and permission to access its database.",
-        )
+        Text("Set up AnkiMCP", style = MaterialTheme.typography.headlineSmall)
+        Text(stringResource(R.string.onboarding_intro))
 
         StepCard(
             title = "1. AnkiDroid",
@@ -86,21 +83,20 @@ fun OnboardingScreen(
             }
         }
 
-        BatteryCard(environment.batteryUnrestricted, oem = FreezingOem.current(), freezeDetected = false, onDismissFreeze = {})
+        BatteryCard(environment.batteryUnrestricted, oem = FreezingOem.current(), freezeDetected = false)
     }
 }
 
 /**
  * Optional battery exemption. On makers whose skins freeze background apps ([oem]) it also names
- * the maker's own switches, which the system exemption does not cover; [freezeDetected] adds a
- * note that this already happened.
+ * the maker's own switches, which the system exemption does not cover. [freezeDetected] makes
+ * it required; the freeze notice itself is its own card above the Status tabs (D59).
  */
 @Composable
 fun BatteryCard(
     unrestricted: Boolean,
     oem: FreezingOem?,
     freezeDetected: Boolean,
-    onDismissFreeze: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -108,28 +104,20 @@ fun BatteryCard(
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             // Not optional on a freezing maker without the exemption, or once a freeze happened.
             val needed = freezeDetected || (oem != null && !unrestricted)
-            Text(if (needed) "Battery" else "Optional: battery", style = MaterialTheme.typography.titleMedium)
-            if (freezeDetected) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        "Your phone froze the connection in the background",
-                        color = MaterialTheme.colorScheme.error,
-                        modifier = Modifier.weight(1f),
-                    )
-                    TextButton(onClick = onDismissFreeze) { Text("Dismiss") }
-                }
-            }
+            Text(if (needed || unrestricted) "Battery" else "Optional: battery", style = MaterialTheme.typography.titleMedium)
             if (unrestricted) {
-                Text("✓ Battery optimisation is off for this app.")
+                Text("✓ Battery optimisation is off for AnkiMCP.")
+                if (freezeDetected) SupportingText(STILL_PAUSED_TEXT)
             } else {
                 Text(
                     if (oem != null) {
                         "This phone pauses background apps soon after the screen turns off, even while " +
-                            "Claude is using them. Both AnkiDroid MCP and AnkiDroid must be allowed to run " +
+                            "Claude is using them. Both AnkiMCP and AnkiDroid must be allowed to run " +
                             "in the background, or Claude's requests time out."
                     } else {
-                        "Android may cut the connection when the phone is idle. To keep it alive, find " +
-                            "AnkiDroid MCP in the list and choose \"Don't optimise\" (or \"Unrestricted\")."
+                        "Android may pause the app when the phone is idle, which cuts the connection once " +
+                            "you use it. To keep it alive, find " +
+                            "AnkiMCP in the list and choose \"Don't optimise\" (or \"Unrestricted\")."
                     },
                 )
             }
@@ -137,7 +125,7 @@ fun BatteryCard(
             when {
                 // The maker's switches live on each app's own page; there is no public intent for its battery sub-page.
                 oem != null -> Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = { openAppSettings(context) }) { Text("AnkiDroid MCP info") }
+                    OutlinedButton(onClick = { openAppSettings(context) }) { Text("AnkiMCP info") }
                     OutlinedButton(onClick = { openAppSettings(context, AnkiDroidAvailability.PACKAGE_NAME) }) {
                         Text("AnkiDroid info")
                     }
@@ -149,15 +137,26 @@ fun BatteryCard(
     }
 }
 
+/** Under the battery tick after a freeze: the system exemption alone did not keep the app running. */
+internal const val STILL_PAUSED_TEXT = "The phone still paused the app; check its background settings in App info."
+
 @Composable
-fun NotificationsCard(granted: Boolean, modifier: Modifier = Modifier) {
+internal fun NotificationsCard(granted: Boolean, use: NotificationsUse, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     StepCard(
         title = "Notifications",
         done = granted,
         doneText = "Notifications are allowed.",
-        todoText = "Notifications are off. When Claude wakes the phone you won't see that it connected, " +
-            "you won't be told when you need to sign in again, and Android may deliver wake-ups late.",
+        todoText = when (use) {
+            NotificationsUse.Local ->
+                "Notifications are off. You won't see that the local server is running, or its Stop button."
+            NotificationsUse.Tunnel ->
+                "Notifications are off. When Claude wakes the phone you won't see that it connected, " +
+                    "you won't be told when you need to sign in again, and Android may deliver wake-ups late."
+            NotificationsUse.Idle ->
+                "Notifications are off. Once you sign in or turn on the local server, you won't see when " +
+                    "the app is connected or running, or its Disconnect and Stop buttons."
+        },
         modifier = modifier,
     ) {
         OutlinedButton(onClick = { openNotificationSettings(context) }) { Text("Open notification settings") }
@@ -200,8 +199,8 @@ private fun openAppSettings(context: Context, packageName: String = context.pack
     }
 }
 
-/** The system list; no direct exemption request (docs/DECISIONS.md D42). */
-private fun openBatterySettings(context: Context) {
+/** The system list; no direct exemption request for the tunnel (docs/DECISIONS.md D42, D56). */
+internal fun openBatterySettings(context: Context) {
     try {
         context.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
     } catch (_: ActivityNotFoundException) {

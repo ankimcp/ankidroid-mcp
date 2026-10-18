@@ -74,7 +74,8 @@ fun interface JsonRpcHandler {
  * Requests are served concurrently, each under a wake lock; pings are answered inline. If no
  * server ping arrives for [healthTimeoutMs] (measured on [clock], which keeps counting while
  * the CPU sleeps) the socket is dropped and [run] returns 1001. [onRequest] is called for every
- * `request` frame before it is handled (drives the idle timer).
+ * `request` frame before it is handled (drives the idle timer). A `request` whose id [dedupe]
+ * has seen before is answered from the original instead of being run again (D52).
  *
  * A check that comes more than one heartbeat interval plus [FROZEN_SLACK_MS] after the previous
  * one on [uptimeClock] (which stops while the CPU sleeps; heartbeat ticks are scheduled on the
@@ -105,6 +106,8 @@ class TunnelClient(
     private val healthTimeoutMs: Long = ProtocolConstants.HEALTH_CHECK_TIMEOUT_MS,
     private val requestTimeoutMs: Long = ProtocolConstants.REQUEST_TIMEOUT_MS,
     private val uptimeClock: ElapsedClock = ElapsedClock.Monotonic,
+    /** Shared by all sessions of the process so a request re-forwarded on a new socket is not run twice. */
+    private val dedupe: RequestDedupe = RequestDedupe(clock),
 ) : TunnelSession {
 
     private sealed interface Event {
@@ -295,18 +298,27 @@ class TunnelClient(
                     }
                     when (message) {
                         is ServerMessage.Request -> {
+                            // Recorded at receipt, before anything runs (D52).
+                            val claim = dedupe.begin(message.requestId)
                             onRequest()
                             // Taken before the coroutine is dispatched so the CPU cannot suspend in between.
                             val wakeLock = wakeLocks.acquire("request", requestTimeoutMs + WAKE_LOCK_SLACK_MS)
                             requestsInFlight.update { it + 1 }
-                            // Released on completion (after the response is flushed, see handleRequest), which
+                            // Released on completion (after the response is flushed, see sendResponse), which
                             // also covers a request cancelled before it ran.
-                            requestScope.launch { handleRequest(ws, message) }
-                                .invokeOnCompletion {
-                                    wakeLock.close()
-                                    requestsInFlight.update { it - 1 }
-                                    onRequestDone()
+                            requestScope.launch {
+                                when (claim) {
+                                    is RequestDedupe.Claim.Fresh -> handleRequest(ws, message, claim.entry)
+                                    is RequestDedupe.Claim.Duplicate -> handleDuplicate(ws, message, claim.entry)
                                 }
+                            }.invokeOnCompletion {
+                                // No-op if the run recorded its outcome; covers a coroutine cancelled
+                                // before it was dispatched, which leaves the id claimable (D52).
+                                if (claim is RequestDedupe.Claim.Fresh) claim.entry.abandon()
+                                wakeLock.close()
+                                requestsInFlight.update { it - 1 }
+                                onRequestDone()
+                            }
                         }
                         is ServerMessage.Ping -> {
                             onServerPing()
@@ -348,21 +360,98 @@ class TunnelClient(
         }
     }
 
-    private suspend fun handleRequest(ws: WebSocket, request: ServerMessage.Request) {
+    /**
+     * Sends the response recorded in [entry], which differs from the built one only when the
+     * timeout fired just as the handler returned: the 200 stored inside the block wins over the
+     * 504, so this send matches what a duplicate would replay.
+     */
+    private suspend fun handleRequest(ws: WebSocket, request: ServerMessage.Request, entry: RequestDedupe.Entry) {
         val start = clock.elapsedMs()
-        val body = request.body
-        val response = try {
-            val responseBody = if (!body.isNullOrEmpty()) {
-                withTimeout(requestTimeoutMs) { handler.handle(body, request.headers) }
-            } else {
-                null
-            }
+        val built = try {
+            // Recorded before the send, so a response lost with a dying socket can still be replayed.
+            buildResponse(request, entry).also(entry::complete)
+        } finally {
+            entry.abandon()
+        }
+        val response = (entry.outcome as? RequestDedupe.Outcome.Answered)?.response ?: built
+        sendResponse(ws, request, response, start)
+    }
+
+    /**
+     * A `request` whose id was seen before: answer with the original's response, never run it
+     * again. An original that never started is claimed again, and then this copy runs it.
+     */
+    private suspend fun handleDuplicate(ws: WebSocket, request: ServerMessage.Request, entry: RequestDedupe.Entry) {
+        val start = clock.elapsedMs()
+        val id = request.requestId
+        if (!entry.result.isCompleted) log.info("Duplicate request $id is waiting for the original")
+        // A var, not the block's value: withTimeoutOrNull may drop a value returned as it times out,
+        // and a reclaimed entry must be run (or abandoned) by someone.
+        var reclaimed: RequestDedupe.Entry? = null
+        val outcome = try {
+            withTimeoutOrNull(requestTimeoutMs) { awaitOriginal(id, entry) { reclaimed = it } }
+        } catch (e: CancellationException) {
+            reclaimed?.abandon()
+            throw e
+        }
+        reclaimed?.let {
+            log.info("Request $id never ran before it was cut off; running the relay's copy")
+            handleRequest(ws, request, it)
+            return
+        }
+        val original = (outcome as? RequestDedupe.Outcome.Answered)?.response
+        val response = if (original != null) {
+            log.info("Replayed response for request $id (duplicate from the relay)")
+            original
+        } else {
+            log.warn("Duplicate request $id: the original was interrupted, answering with an error")
             ClientMessage.Response(
-                requestId = request.requestId,
+                requestId = id,
                 statusCode = 200,
                 headers = JSON_HEADERS,
-                body = responseBody?.takeIf { it.isNotEmpty() },
+                body = errorEnvelope(extractRequestId(request.body), INTERRUPTED_CODE, INTERRUPTED_MESSAGE).toString(),
             )
+        }
+        sendResponse(ws, request, response, start)
+    }
+
+    /**
+     * Waits for [first]'s outcome. An original that never ran is claimed again: if this copy gets
+     * the id, [onReclaimed] receives the new entry (before any suspension) and the result is
+     * null; if another copy got it first, that run is awaited instead.
+     */
+    private suspend fun awaitOriginal(
+        id: String,
+        first: RequestDedupe.Entry,
+        onReclaimed: (RequestDedupe.Entry) -> Unit,
+    ): RequestDedupe.Outcome? {
+        var entry = first
+        while (true) {
+            val outcome = entry.result.await()
+            if (outcome != RequestDedupe.Outcome.NeverRan) return outcome
+            when (val claim = dedupe.begin(id)) {
+                is RequestDedupe.Claim.Fresh -> {
+                    onReclaimed(claim.entry)
+                    return null
+                }
+                is RequestDedupe.Claim.Duplicate -> entry = claim.entry
+            }
+        }
+    }
+
+    private suspend fun buildResponse(request: ServerMessage.Request, entry: RequestDedupe.Entry): ClientMessage.Response {
+        val body = request.body
+        return try {
+            if (!body.isNullOrEmpty()) {
+                withTimeout(requestTimeoutMs) {
+                    entry.markStarted()
+                    val responseBody = handler.handle(body, request.headers)
+                    // Recorded here, so a cancellation arriving as the handler returns cannot lose it.
+                    okResponse(request, responseBody).also(entry::complete)
+                }
+            } else {
+                okResponse(request, null)
+            }
         } catch (e: TimeoutCancellationException) {
             ClientMessage.Response(
                 requestId = request.requestId,
@@ -381,6 +470,21 @@ class TunnelClient(
                 body = errorEnvelope(JsonNull, -32603, "Internal error: ${e.message}").toString(),
             )
         }
+    }
+
+    private fun okResponse(request: ServerMessage.Request, body: String?) = ClientMessage.Response(
+        requestId = request.requestId,
+        statusCode = 200,
+        headers = JSON_HEADERS,
+        body = body?.takeIf { it.isNotEmpty() },
+    )
+
+    private suspend fun sendResponse(
+        ws: WebSocket,
+        request: ServerMessage.Request,
+        response: ClientMessage.Response,
+        start: Long,
+    ) {
         if (!ws.send(Protocol.encode(response))) {
             log.warn("Could not send response for ${request.requestId}: socket closed")
         } else {
@@ -428,6 +532,12 @@ class TunnelClient(
 
         /** How late a watchdog check may run on uptime before it counts as a freeze. */
         const val FROZEN_SLACK_MS = 10_000L
+
+        /** JSON-RPC error for a duplicate whose original was cut off before it had a response (D52). */
+        const val INTERRUPTED_CODE = -32001
+        const val INTERRUPTED_MESSAGE =
+            "The phone was interrupted while handling this request, so its result is unknown. " +
+                "Check AnkiDroid before repeating a change."
 
         internal fun errorEnvelope(id: kotlinx.serialization.json.JsonElement, code: Int, message: String): JsonObject =
             buildJsonObject {

@@ -26,6 +26,8 @@ class McpServer(
     private val serverVersion: String,
     private val instructions: String = SERVER_INSTRUCTIONS,
     private val log: TunnelLog? = null,
+    private val prompts: PromptRegistry = PromptRegistry(emptyList()),
+    private val resources: ResourceRegistry = ResourceRegistry(emptyList()),
 ) : JsonRpcHandler {
 
     override suspend fun handle(body: String, headers: Map<String, String>): String? =
@@ -81,11 +83,131 @@ class McpServer(
             "ping" -> JsonObject(emptyMap())
             "tools/list" -> listTools(supportsStructuredOutput(protocolVersion))
             "tools/call" -> callTool(params, supportsStructuredOutput(protocolVersion))
-            "resources/list" -> buildJsonObject { put("resources", JsonArray(emptyList())) }
+            "resources/list" -> listResources()
+            "resources/read" -> readResource(params)
             "resources/templates/list" -> buildJsonObject { put("resourceTemplates", JsonArray(emptyList())) }
-            "prompts/list" -> buildJsonObject { put("prompts", JsonArray(emptyList())) }
+            "prompts/list" -> listPrompts()
+            "prompts/get" -> getPrompt(params)
             else -> throw JsonRpcException(JsonRpcErrors.METHOD_NOT_FOUND, "Method not found: $method")
         }
+
+    /** Same shape as the add-on's FastMCP: `{name, title?, description, arguments: [{name, description?, required}]}`. */
+    private fun listPrompts(): JsonObject = buildJsonObject {
+        put(
+            "prompts",
+            buildJsonArray {
+                prompts.prompts.forEach { prompt ->
+                    add(
+                        buildJsonObject {
+                            put("name", prompt.name)
+                            prompt.title?.let { put("title", it) }
+                            put("description", prompt.description)
+                            put(
+                                "arguments",
+                                buildJsonArray {
+                                    prompt.arguments.forEach { argument ->
+                                        add(
+                                            buildJsonObject {
+                                                put("name", argument.name)
+                                                argument.description?.let { put("description", it) }
+                                                put("required", argument.required)
+                                            },
+                                        )
+                                    }
+                                },
+                            )
+                        },
+                    )
+                }
+            },
+        )
+    }
+
+    /** `{description, messages: [{role: "user", content: {type: "text", text}}]}`, as FastMCP renders a prompt returning a string. */
+    private fun getPrompt(params: JsonObject): JsonObject {
+        val name = (params["name"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+            ?: throw JsonRpcException(JsonRpcErrors.INVALID_PARAMS, "Missing prompt name")
+        val prompt = prompts[name] ?: throw JsonRpcException(JsonRpcErrors.INVALID_PARAMS, "Unknown prompt: $name")
+        val arguments = when (val raw = params["arguments"]) {
+            null, JsonNull -> emptyMap()
+            is JsonObject -> raw.mapValues { (key, value) ->
+                (value as? JsonPrimitive)?.takeIf { it.isString }?.content
+                    ?: throw JsonRpcException(JsonRpcErrors.INVALID_PARAMS, "Prompt argument $key must be a string")
+            }
+            else -> throw JsonRpcException(JsonRpcErrors.INVALID_PARAMS, "arguments must be an object")
+        }
+        val required = prompt.arguments.filter { it.required && it.name !in arguments }.map { it.name }
+        if (required.isNotEmpty()) {
+            throw JsonRpcException(JsonRpcErrors.INVALID_PARAMS, "Missing required arguments: ${required.joinToString(", ")}")
+        }
+        val text = try {
+            prompt.render(arguments)
+        } catch (e: PromptArgumentException) {
+            throw JsonRpcException(JsonRpcErrors.INVALID_PARAMS, "Error rendering prompt $name: ${e.message}")
+        }
+        log?.info("prompts/get $name")
+        return buildJsonObject {
+            put("description", prompt.description)
+            put(
+                "messages",
+                buildJsonArray {
+                    add(
+                        buildJsonObject {
+                            put("role", "user")
+                            put(
+                                "content",
+                                buildJsonObject {
+                                    put("type", "text")
+                                    put("text", text)
+                                },
+                            )
+                        },
+                    )
+                },
+            )
+        }
+    }
+
+    /** `{name, title?, uri, description, mimeType}` per resource, FastMCP's field order. */
+    private fun listResources(): JsonObject = buildJsonObject {
+        put(
+            "resources",
+            buildJsonArray {
+                resources.resources.forEach { resource ->
+                    add(
+                        buildJsonObject {
+                            put("name", resource.name)
+                            resource.title?.let { put("title", it) }
+                            put("uri", resource.uri)
+                            put("description", resource.description)
+                            put("mimeType", resource.mimeType)
+                        },
+                    )
+                }
+            },
+        )
+    }
+
+    private fun readResource(params: JsonObject): JsonObject {
+        val uri = (params["uri"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+            ?: throw JsonRpcException(JsonRpcErrors.INVALID_PARAMS, "Missing resource uri")
+        val resource = resources[uri] ?: throw JsonRpcException(JsonRpcErrors.RESOURCE_NOT_FOUND, "Unknown resource: $uri")
+        log?.info("resources/read $uri")
+        return buildJsonObject {
+            put(
+                "contents",
+                buildJsonArray {
+                    add(
+                        buildJsonObject {
+                            put("uri", resource.uri)
+                            put("mimeType", resource.mimeType)
+                            put("text", resource.read())
+                        },
+                    )
+                },
+            )
+        }
+    }
 
     private fun initialize(params: JsonObject): JsonObject {
         val requested = (params["protocolVersion"] as? JsonPrimitive)?.takeIf { it.isString }?.content
@@ -93,12 +215,19 @@ class McpServer(
         val version = requested?.takeIf { it in SUPPORTED_PROTOCOL_VERSIONS } ?: LATEST_PROTOCOL_VERSION
         return buildJsonObject {
             put("protocolVersion", version)
-            put("capabilities", buildJsonObject { put("tools", JsonObject(emptyMap())) })
+            put(
+                "capabilities",
+                buildJsonObject {
+                    put("tools", JsonObject(emptyMap()))
+                    if (prompts.prompts.isNotEmpty()) put("prompts", JsonObject(emptyMap()))
+                    if (resources.resources.isNotEmpty()) put("resources", JsonObject(emptyMap()))
+                },
+            )
             put(
                 "serverInfo",
                 buildJsonObject {
                     put("name", SERVER_NAME)
-                    put("title", "AnkiDroid MCP")
+                    put("title", "AnkiMCP")
                     put("version", serverVersion)
                 },
             )
@@ -174,10 +303,15 @@ class McpServer(
         /** Adapted from `SERVER_INSTRUCTIONS` in the add-on's mcp_server.py. */
         const val SERVER_INSTRUCTIONS =
             "This server works on the user's local AnkiDroid collection on their Android phone, " +
-                "reached through AnkiDroid's content provider while the AnkiDroid MCP app is connected. " +
+                "reached through AnkiDroid's content provider while the AnkiMCP app is connected. " +
                 "Results reflect the phone's collection at call time; no tool call syncs with AnkiWeb, " +
-                "so if the user also studies on other devices, suggest syncing in AnkiDroid first. " +
-                "Only read-only tools are available in this version. " +
+                "so if the user also studies on other devices, suggest syncing in AnkiDroid first; the sync " +
+                "tool only posts a notification the user must tap, and reports no result. " +
+                "AI-driven review loop: get_due_cards -> present_card (question first, then " +
+                "show_answer=true once the user has answered) -> rate_card, with the user confirming the " +
+                "rating after seeing the answer; never repeat a rate_card call that may have gone through. " +
+                "The anki://query-syntax resource documents the search syntax find_notes accepts; the " +
+                "review_session and twenty_rules prompts guide a review session and writing good cards. " +
                 "Create, edit or delete only the notes, decks, note types and media the user asked for."
     }
 }

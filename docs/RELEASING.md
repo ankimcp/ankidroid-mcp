@@ -114,7 +114,7 @@ now invited like a user:
 2. Cloud Console > IAM & Admin > Service Accounts > Create service account (no Cloud roles
    needed), then Keys > Add key > JSON. That file is `PLAY_SERVICE_ACCOUNT_JSON`.
 3. [Play Console](https://play.google.com/console) > Users and permissions > Invite new users:
-   the service account's email, app permissions for AnkiDroid MCP only, with "Release apps to
+   the service account's email, app permissions for AnkiMCP only, with "Release apps to
    testing tracks" (plus the view permissions it implies).
 
 ### First upload is manual

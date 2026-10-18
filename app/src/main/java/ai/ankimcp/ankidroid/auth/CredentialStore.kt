@@ -167,10 +167,13 @@ class KeystoreCredentialStore(
         const val TAG = "CredentialStore"
         const val PREFS_NAME = "credentials_v1"
 
-        fun isPermanent(e: Throwable): Boolean = generateSequence(e) { it.cause }.any {
-            it is AEADBadTagException || it is KeyPermanentlyInvalidatedException || it is UnrecoverableKeyException
-        }
+        fun isPermanent(e: Throwable): Boolean = isUndecryptable(e)
     }
+}
+
+/** The blob can never be decrypted (bad tag, invalidated or missing key), also when wrapped as a cause. */
+internal fun isUndecryptable(e: Throwable): Boolean = generateSequence(e) { it.cause }.any {
+    it is AEADBadTagException || it is KeyPermanentlyInvalidatedException || it is UnrecoverableKeyException
 }
 
 /** IV and ciphertext as Base64 strings (same format as Android's `Base64.NO_WRAP`). */
@@ -220,7 +223,11 @@ class KeystoreCredentialCipher : CredentialCipher {
 
     private fun existingKey(): SecretKey? = keyStore().getKey(KEY_ALIAS, null) as? SecretKey
 
-    private fun getOrCreateKey(): SecretKey = existingKey() ?: KeyGenerator
+    // One lock for every instance: the credential store and the local server token share the
+    // alias, and two first saves at once must not generate the key twice.
+    private fun getOrCreateKey(): SecretKey = synchronized(KEY_LOCK) { existingKey() ?: generateKey() }
+
+    private fun generateKey(): SecretKey = KeyGenerator
         .getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE)
         .apply {
             init(
@@ -236,6 +243,7 @@ class KeystoreCredentialCipher : CredentialCipher {
     private companion object {
         const val ANDROID_KEYSTORE = "AndroidKeyStore"
         const val KEY_ALIAS = "ankimcp_credentials_v1"
+        val KEY_LOCK = Any()
         const val TRANSFORMATION = "AES/GCM/NoPadding"
         const val GCM_TAG_BITS = 128
     }

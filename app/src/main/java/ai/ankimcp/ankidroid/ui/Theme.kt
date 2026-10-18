@@ -81,12 +81,26 @@ private val DarkColors = darkColorScheme(
     outlineVariant = Color(0xFF3A4864),
 )
 
-/** Tunnel and log state colours that Material's scheme has no slot for; each passes AA on cards. */
+/**
+ * Tunnel and log state colours that Material's scheme has no slot for; connected and warning
+ * pass AA on cards. The Status tabs' dot (D59) also uses [connectingDot], a brighter amber
+ * that only needs 3:1 as a graphic, and [off], the scheme's outline grey.
+ */
 @Immutable
-data class StatusColors(val connected: Color, val warning: Color)
+data class StatusColors(val connected: Color, val warning: Color, val connectingDot: Color, val off: Color)
 
-private val LightStatus = StatusColors(connected = Color(0xFF1B6E2A), warning = Color(0xFF8A5300))
-private val DarkStatus = StatusColors(connected = Color(0xFF7BD88F), warning = Color(0xFFFFB95C))
+private val LightStatus = StatusColors(
+    connected = Color(0xFF1B6E2A),
+    warning = Color(0xFF8A5300),
+    connectingDot = Color(0xFFB88300),
+    off = LightColors.outline,
+)
+private val DarkStatus = StatusColors(
+    connected = Color(0xFF7BD88F),
+    warning = Color(0xFFFFB95C),
+    connectingDot = Color(0xFFE0A800),
+    off = DarkColors.outline,
+)
 
 val LocalStatusColors = staticCompositionLocalOf { LightStatus }
 

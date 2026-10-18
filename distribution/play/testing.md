@@ -21,11 +21,11 @@ are opted in at the same time.
 Send this to every tester (email or forum DM) after they are on the list.
 
 ```
-Thanks for testing AnkiDroid MCP. Takes about 10 minutes to set up, then just use it normally for two weeks.
+Thanks for testing AnkiMCP. Takes about 10 minutes to set up, then just use it normally for two weeks.
 
 1. Join the test: open https://play.google.com/apps/testing/ai.ankimcp.ankidroid on your phone (same Google account you gave me), tap "Become a tester", then install from the Play Store link on that page. If you installed the APK from GitHub before, uninstall it first.
 2. Make sure AnkiDroid is installed and opened once. In AnkiDroid: Settings > Advanced > "Enable AnkiDroid API" must be on (it is by default).
-3. Open AnkiDroid MCP, allow access to AnkiDroid, tap Sign in, check the code matches in the browser and approve with your AnkiMCP account. On Android 13+ allow notifications.
+3. Open AnkiMCP, allow access to AnkiDroid, then on the Status tab under Remote tap Sign in, check the code matches in the browser and approve with your AnkiMCP account. On Android 13+ allow notifications.
 4. On the Status tab tap Copy URL. In Claude (web or app): Settings > Connectors > Add custom connector, paste the URL, sign in with the same AnkiMCP account.
 5. Things to try, and tell me what happened:
    a. Tap Connect, then ask Claude "list my Anki decks". Do the decks and due counts match AnkiDroid?
@@ -44,7 +44,7 @@ Please keep the app installed and stay opted in for the full 14 days, even if yo
 Title: **Looking for 15 testers: Claude + AnkiDroid on Android (2 weeks)**
 
 ```
-AnkiDroid MCP is a small open-source Android app that lets Claude read your AnkiDroid decks through your AnkiMCP account, the same way the desktop add-on does for Anki, but without a computer running. Version 0.1.0 has one read-only tool (deck names and today's due counts); more will follow.
+AnkiMCP for AnkiDroid is a small open-source Android app that lets Claude read and edit your AnkiDroid collection through your AnkiMCP account (or over your Wi-Fi, without an account), the same way the desktop add-on does for Anki, but without a computer running. Claude can read decks, search and read notes, add, edit and delete notes, manage tags, flag, suspend and bury cards, rate cards while you study, work with note types and ask you to sync. Needs AnkiDroid 2.24 or newer.
 
 Google requires 12 testers for 14 days before a new app can go on the Play Store, so I need your help.
 
@@ -60,7 +60,7 @@ Reply here or DM me with the Google account email (or join the Google Group: <GR
 
 ## Play Console steps, in order
 
-1. **Create app** (All apps > Create app): name `AnkiDroid MCP`, default language en-US, App,
+1. **Create app** (All apps > Create app): name `AnkiMCP`, default language en-US, App,
    Free. Accept the declarations (Developer Program Policies, US export laws).
 2. **First upload, by hand.** Test and release > Testing > Internal testing > Create new
    release; enrol in Play App Signing; upload the AAB from the GitHub Release (or the
@@ -75,7 +75,7 @@ Reply here or DM me with the Google account email (or join the Google Group: <GR
    - Privacy policy: `https://ankimcp.ai/privacy/`
    - App access: "All or some functionality is restricted". Give a test AnkiMCP account
      (email + password) and steps: install AnkiDroid, open it once, open the app, grant the
-     AnkiDroid permission, Sign in, approve the code in the browser with the test account,
+     AnkiDroid permission, Sign in (Status tab, Remote), approve the code in the browser with the test account,
      Connect. Without this review fails or stalls.
    - Ads: No, the app contains no ads.
    - Content rating: start the IARC questionnaire (below).

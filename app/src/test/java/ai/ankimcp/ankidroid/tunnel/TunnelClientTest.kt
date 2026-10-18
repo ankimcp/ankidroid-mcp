@@ -6,6 +6,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
@@ -34,6 +35,7 @@ import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
 class TunnelClientTest {
@@ -95,13 +97,17 @@ class TunnelClientTest {
         wakeLocks: WakeLocks = WakeLocks.None,
         onRequestDone: () -> Unit = {},
         queueSize: (WebSocket) -> Long = { it.queueSize() },
+        dedupe: RequestDedupe = RequestDedupe(clock),
+        onRequest: () -> Unit = {},
+        log: TunnelLog = TunnelLog(mirrorToLogcat = false),
     ) = TunnelClient(
         http = http,
         url = url,
         accessToken = "token-123",
         clientVersion = "0.1.0",
         handler = handler,
-        log = TunnelLog(mirrorToLogcat = false),
+        log = log,
+        onRequest = onRequest,
         clock = clock,
         wakeLocks = wakeLocks,
         onEstablished = onEstablished,
@@ -113,7 +119,12 @@ class TunnelClientTest {
         uptimeClock = uptimeClock,
         onRequestDone = onRequestDone,
         queueSize = queueSize,
+        dedupe = dedupe,
     )
+
+    private fun requestFrame(requestId: String, rpcId: Int) =
+        """{"type":"request","requestId":"$requestId","method":"POST","path":"/mcp","headers":{},""" +
+            """"body":"{\"jsonrpc\":\"2.0\",\"id\":$rpcId,\"method\":\"tools/call\"}"}"""
 
     private fun nextMessage(): JsonObject {
         val raw = received.poll(5, TimeUnit.SECONDS)
@@ -338,6 +349,34 @@ class TunnelClientTest {
         val body = Json.parseToJsonElement(response["body"]!!.jsonPrimitive.content).jsonObject
         assertEquals(-32004, body["error"]!!.jsonObject["code"]!!.jsonPrimitive.int)
         assertEquals(42, body["id"]!!.jsonPrimitive.int)
+
+        serverSocket.get(1, TimeUnit.SECONDS).close(1000, "bye")
+        withTimeout(10_000) { run.await() }
+        Unit
+    }
+
+    @Test
+    fun `a handler that returns as the timeout fires sends its stored 200, not a 504`() = runBlocking {
+        enqueueRelay { ws ->
+            establish(ws)
+            ws.send(requestFrame("req-t", 7))
+        }
+        val run = async(Dispatchers.IO) {
+            client(
+                // Suspends once (withTimeout keeps the value of a block that never suspended), then
+                // blocks past the timeout, so withTimeout throws after the response was recorded.
+                handler = JsonRpcHandler { _, _ ->
+                    delay(10)
+                    Thread.sleep(500)
+                    """{"jsonrpc":"2.0","id":7,"result":{}}"""
+                },
+                requestTimeoutMs = 100,
+            ).run()
+        }
+
+        val response = nextMessage()
+        assertEquals(200, response["statusCode"]!!.jsonPrimitive.int)
+        assertEquals("""{"jsonrpc":"2.0","id":7,"result":{}}""", response["body"]!!.jsonPrimitive.content)
 
         serverSocket.get(1, TimeUnit.SECONDS).close(1000, "bye")
         withTimeout(10_000) { run.await() }
@@ -772,6 +811,198 @@ class TunnelClientTest {
 
         serverSocket.get(1, TimeUnit.SECONDS).close(1000, "bye")
         withTimeout(10_000) { run.await() }
+        Unit
+    }
+
+    @Test
+    fun `a repeated request id on one connection runs the handler once and answers both`() = runBlocking {
+        val calls = AtomicInteger(0)
+        val wakeLocks = RecordingWakeLocks()
+        enqueueRelay { ws ->
+            establish(ws)
+            ws.send(requestFrame("dup-1", 5))
+            ws.send(requestFrame("dup-1", 5))
+        }
+        val tunnel = client(
+            handler = JsonRpcHandler { _, _ ->
+                calls.incrementAndGet()
+                """{"jsonrpc":"2.0","id":5,"result":{"added":1}}"""
+            },
+            wakeLocks = wakeLocks,
+        )
+        val run = async(Dispatchers.IO) { tunnel.run() }
+
+        val first = nextMessage()
+        val second = nextMessage()
+        assertEquals(first, second)
+        assertEquals("dup-1", first["requestId"]!!.jsonPrimitive.content)
+        assertEquals("""{"jsonrpc":"2.0","id":5,"result":{"added":1}}""", first["body"]!!.jsonPrimitive.content)
+        withTimeout(5_000) { tunnel.awaitRequestsIdle() }
+        assertEquals(1, calls.get())
+        assertEquals(listOf("request", "request"), wakeLocks.acquired.toList())
+
+        tunnel.disconnect()
+        withTimeout(5_000) { run.await() }
+        Unit
+    }
+
+    @Test
+    fun `a response lost with the old socket is replayed on the new one without running the tool again`() = runBlocking {
+        val calls = AtomicInteger(0)
+        val dedupe = RequestDedupe(ElapsedClock.Monotonic)
+        enqueueRelay { ws ->
+            establish(ws)
+            ws.send(requestFrame("re-1", 6))
+        }
+        enqueueRelay { ws ->
+            establish(ws)
+            ws.send(requestFrame("re-1", 6))
+        }
+        lateinit var old: TunnelClient
+        val handler = JsonRpcHandler { _, _ ->
+            calls.incrementAndGet()
+            // The socket goes away after the tool ran, before its response is sent.
+            old.disconnect()
+            """{"jsonrpc":"2.0","id":6,"result":{"added":1}}"""
+        }
+        old = client(handler = handler, dedupe = dedupe)
+
+        // run() on this single thread: the handler returns and the send fails before the loop
+        // sees the close.
+        assertEquals(CloseCodes.NORMAL, withTimeout(10_000) { old.run() }.code)
+        assertTrue("the old socket sent no response", received.isEmpty())
+
+        val tunnel = client(handler = handler, dedupe = dedupe)
+        val run = async(Dispatchers.IO) { tunnel.run() }
+
+        val response = nextMessage()
+        assertEquals("re-1", response["requestId"]!!.jsonPrimitive.content)
+        assertEquals(200, response["statusCode"]!!.jsonPrimitive.int)
+        assertEquals("""{"jsonrpc":"2.0","id":6,"result":{"added":1}}""", response["body"]!!.jsonPrimitive.content)
+        assertEquals(1, calls.get())
+
+        tunnel.disconnect()
+        withTimeout(5_000) { run.await() }
+        Unit
+    }
+
+    @Test
+    fun `a duplicate of a cut-off request gets a JSON-RPC error instead of a second run`() = runBlocking {
+        val calls = AtomicInteger(0)
+        val started = CompletableDeferred<Unit>()
+        val dedupe = RequestDedupe(ElapsedClock.Monotonic)
+        enqueueRelay { ws ->
+            establish(ws)
+            ws.send(requestFrame("cut-1", 7))
+        }
+        enqueueRelay { ws ->
+            establish(ws)
+            ws.send(requestFrame("cut-1", 7))
+        }
+        val handler = JsonRpcHandler { _, _ ->
+            calls.incrementAndGet()
+            started.complete(Unit)
+            awaitCancellation()
+        }
+        val old = client(handler = handler, dedupe = dedupe, requestTimeoutMs = 60_000)
+        val oldRun = async(Dispatchers.IO) { old.run() }
+        withTimeout(5_000) { started.await() }
+        old.abort("Push wake while connected")
+        withTimeout(5_000) { oldRun.await() }
+
+        val tunnel = client(handler = handler, dedupe = dedupe)
+        val run = async(Dispatchers.IO) { tunnel.run() }
+
+        val response = nextMessage()
+        assertEquals("cut-1", response["requestId"]!!.jsonPrimitive.content)
+        assertEquals(200, response["statusCode"]!!.jsonPrimitive.int)
+        val body = Json.parseToJsonElement(response["body"]!!.jsonPrimitive.content).jsonObject
+        assertEquals(7, body["id"]!!.jsonPrimitive.int)
+        val error = body["error"]!!.jsonObject
+        assertEquals(TunnelClient.INTERRUPTED_CODE, error["code"]!!.jsonPrimitive.int)
+        assertEquals(TunnelClient.INTERRUPTED_MESSAGE, error["message"]!!.jsonPrimitive.content)
+        assertEquals(1, calls.get())
+
+        tunnel.disconnect()
+        withTimeout(5_000) { run.await() }
+        Unit
+    }
+
+    @Test
+    fun `a request aborted before its handler started runs once when the relay re-forwards it`() = runBlocking {
+        val calls = AtomicInteger(0)
+        val dedupe = RequestDedupe(ElapsedClock.Monotonic)
+        enqueueRelay { ws ->
+            establish(ws)
+            ws.send(requestFrame("never-1", 8))
+        }
+        enqueueRelay { ws ->
+            establish(ws)
+            ws.send(requestFrame("never-1", 8))
+        }
+        val handler = JsonRpcHandler { _, _ ->
+            calls.incrementAndGet()
+            """{"jsonrpc":"2.0","id":8,"result":{"added":1}}"""
+        }
+        lateinit var old: TunnelClient
+        // The abort is queued while the frame is handled, so on this single thread the loop sees it
+        // before the request coroutine is ever dispatched.
+        old = client(handler = handler, dedupe = dedupe, onRequest = { old.abort("Push wake while connected") })
+
+        assertEquals(CloseCodes.GOING_AWAY, withTimeout(10_000) { old.run() }.code)
+        assertEquals("the handler never ran on the old socket", 0, calls.get())
+        assertTrue("the old socket sent no response", received.isEmpty())
+
+        val tunnel = client(handler = handler, dedupe = dedupe)
+        val run = async(Dispatchers.IO) { tunnel.run() }
+
+        val response = nextMessage()
+        assertEquals("never-1", response["requestId"]!!.jsonPrimitive.content)
+        assertEquals(200, response["statusCode"]!!.jsonPrimitive.int)
+        assertEquals("""{"jsonrpc":"2.0","id":8,"result":{"added":1}}""", response["body"]!!.jsonPrimitive.content)
+        assertEquals(1, calls.get())
+
+        tunnel.disconnect()
+        withTimeout(5_000) { run.await() }
+        Unit
+    }
+
+    @Test
+    fun `a duplicate waiting on a running original that is cancelled answers -32001 at once`() = runBlocking {
+        val calls = AtomicInteger(0)
+        val release = CompletableDeferred<Unit>()
+        val log = TunnelLog(mirrorToLogcat = false)
+        enqueueRelay { ws ->
+            establish(ws)
+            ws.send(requestFrame("wait-1", 9))
+            ws.send(requestFrame("wait-1", 9))
+        }
+        val tunnel = client(
+            handler = JsonRpcHandler { _, _ ->
+                calls.incrementAndGet()
+                release.await()
+                throw kotlinx.coroutines.CancellationException("cut off")
+            },
+            // Far above the wait below: the duplicate must wake on the original's end, not time out.
+            requestTimeoutMs = 60_000,
+            log = log,
+        )
+        val run = async(Dispatchers.IO) { tunnel.run() }
+
+        withTimeout(5_000) { log.entries.first { entries -> entries.any { "is waiting for the original" in it.message } } }
+        release.complete(Unit)
+
+        val response = nextMessage()
+        assertEquals("wait-1", response["requestId"]!!.jsonPrimitive.content)
+        assertEquals(200, response["statusCode"]!!.jsonPrimitive.int)
+        val error = Json.parseToJsonElement(response["body"]!!.jsonPrimitive.content).jsonObject["error"]!!.jsonObject
+        assertEquals(TunnelClient.INTERRUPTED_CODE, error["code"]!!.jsonPrimitive.int)
+        withTimeout(5_000) { tunnel.awaitRequestsIdle() }
+        assertEquals(1, calls.get())
+        assertTrue("the cut-off original sent nothing", received.isEmpty())
+
+        tunnel.disconnect()
+        withTimeout(5_000) { run.await() }
         Unit
     }
 }

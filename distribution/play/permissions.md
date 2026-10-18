@@ -2,25 +2,34 @@
 
 Permissions in the merged release manifest
 (`app/build/intermediates/merged_manifest/release/processReleaseMainManifest/AndroidManifest.xml`,
-built 2026-10-15). The first eight are declared in `app/src/main/AndroidManifest.xml`; the last
-two come from libraries.
+built 2026-10-15, rechecked 2026-10-18 after the local Wi-Fi server added
+`REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`). Eight are declared in
+`app/src/main/AndroidManifest.xml`; `RECEIVE_BOOT_COMPLETED` and the last two come from
+libraries.
 
 | Permission | Kind | Why | Play declaration |
 |---|---|---|---|
-| `INTERNET` | normal | WebSocket to the AnkiMCP relay, sign-in, push registration | none |
+| `INTERNET` | normal | WebSocket to the AnkiMCP relay, sign-in, push registration; the local Wi-Fi server's listening socket | none |
 | `ACCESS_NETWORK_STATE` | normal | `NetworkMonitor`: wait for a validated network instead of burning reconnect attempts; reconnect when the default network changes | none |
 | `FOREGROUND_SERVICE` | normal | Required for any foreground service | none (covered by the type below) |
 | `FOREGROUND_SERVICE_SPECIAL_USE` | normal, Play-reviewed | `TunnelForegroundService`, type `specialUse` | **Foreground service declaration** (below) |
 | `POST_NOTIFICATIONS` | runtime (Android 13+) | The foreground service notification (with Disconnect) and "Sign in again to AnkiMCP". Asked after sign-in; the app works without it, the user just does not see when Claude wakes the phone | none |
 | `RECEIVE_BOOT_COMPLETED` | normal (from androidx.work) | Not declared by the app. WorkManager's `RescheduleReceiver` re-schedules the push-registration retry, daily check and token-delete jobs after a reboot. The app itself does nothing at boot and never starts the tunnel then | none |
 | `WAKE_LOCK` | normal | Short partial wake locks around reconnects, liveness checks from while-idle alarms, and finishing in-flight requests on screen off (`AndroidWakeLocks`); also used by FCM and WorkManager | none |
+| `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` | normal, Play-policy-restricted | `ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` dialog, offered only while the local Wi-Fi server is on (D56). Never asked for tunnel use | Play Console has no form; be ready to justify it on review: "The local Wi-Fi server mode has no server component, so it cannot use FCM high-priority messages to wake the phone; Doze would otherwise make the user's own MCP server on their LAN unreachable. The request is only shown after the user turns that mode on, with this explanation." |
 | `com.ichi2.anki.permission.READ_WRITE_DATABASE` | runtime (AnkiDroid's own, dangerous level) | Read decks through AnkiDroid's ContentProvider | none in Play Console; explain in the listing (done) |
+| `com.android.vending.BILLING` | normal (declared by the app and by the Play Billing Library) | Plus and Pro subscriptions through Google Play (D62). The library also adds `<queries>` for Play's billing service and its own non-exported `ProxyBillingActivity`; no location or other permission comes with it (merged release manifest checked) | none; the subscriptions are set up under Monetize in Play Console |
 | `com.google.android.c2dm.permission.RECEIVE` | normal (from firebase-messaging) | Receive FCM wake-up messages | none |
 | `ai.ankimcp.ankidroid.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION` | signature (from androidx.core) | Internal guard for non-exported runtime receivers; no user impact | none |
 
-Not requested, on purpose: `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` (D42: Play forbids it for
-apps that can use high-priority FCM), `SCHEDULE_EXACT_ALARM`/`USE_EXACT_ALARM` (alarms are
+`REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` was left out until the local Wi-Fi server (D42: Play
+forbids it for apps that can use high-priority FCM; D56: the local mode cannot, and only that
+mode asks). Not requested, on purpose: `SCHEDULE_EXACT_ALARM`/`USE_EXACT_ALARM` (alarms are
 inexact while-idle), any location, storage or contacts permission.
+
+"Share detailed log" (D61) needs no permission: the app reads its own logcat lines (no
+`READ_LOGS`), writes the file to its private cache and hands it to the app the user picks
+through a non-exported androidx `FileProvider` with a one-time read grant for that one file.
 
 ## FOREGROUND_SERVICE_SPECIAL_USE declaration
 
@@ -38,11 +47,13 @@ Persistent outbound connection that lets the user's AI assistant read their loca
 **Description of the app functionality that uses this foreground service:**
 
 ```
-AnkiDroid MCP lets the user's AI assistant (Claude) read the user's AnkiDroid flashcard decks on the phone. AnkiDroid only exposes the collection through a local ContentProvider, so the data cannot be fetched from a server: the phone has to answer each request itself. TunnelForegroundService keeps one outbound WebSocket open to the AnkiMCP relay (wss://ankidroid.ankimcp.ai). The relay forwards the assistant's requests over this connection; the app reads AnkiDroid and sends the answer back on the same socket. No ports are opened on the phone.
+The AnkiMCP app lets the user's AI assistant (Claude) read and edit the user's AnkiDroid flashcard collection on the phone. AnkiDroid only exposes the collection through a local ContentProvider, so the data cannot be fetched from a server: the phone has to answer each request itself. TunnelForegroundService keeps one outbound WebSocket open to the AnkiMCP relay (wss://ankidroid.ankimcp.ai). The relay forwards the assistant's requests over this connection; the app reads or edits AnkiDroid and sends the answer back on the same socket. No ports are opened on the phone.
 
-The service starts in two ways: (1) the user taps Connect in the app, or (2) the AnkiMCP server sends a high-priority FCM data message when the user's assistant makes a request and the phone is not connected. While it runs, a notification shows the connection state and a Disconnect action.
+The service starts in two ways: (1) the user taps Connect in the app, or (2) the AnkiMCP relay server sends a high-priority FCM data message when the user's assistant makes a request and the phone is not connected. While it runs, a notification shows the connection state and a Disconnect action.
 
 The service stops when the user taps Disconnect or signs out. When push wake-ups are set up (the normal case), it also stops as soon as the screen turns off and after a user-chosen idle period (15, 30 or 60 minutes) without requests; without them, a session the user started by tapping Connect stays up until Disconnect. It is never started at boot.
+
+Optional local mode: when the user turns on "Local server (Wi-Fi)" (no account needed), the same service also answers the assistant's requests directly over HTTP on the phone's Wi-Fi address, for Claude Desktop or Claude Code on a computer on the same network. It then keeps running, with a notification showing the server's address and a "Stop local server" action, until the user turns the local server off. With the local server switched on, the server is started whenever the service starts: from the app in the foreground (turning the switch on, or opening the app after the process was killed), and also when the service is started by a push wake-up for the tunnel (path 2 above). It is never started at boot.
 
 None of the other foreground service types fit: this is not data sync (nothing is uploaded or downloaded in bulk; the connection waits for requests that the user makes through the assistant), not media, location, connected device or phone call, and the work cannot be deferred to WorkManager or a job because each request must be answered within the assistant's ~25 second timeout.
 ```
@@ -76,7 +87,7 @@ it does not exist unless AnkiDroid is installed (hence `<queries>` for `com.ichi
 Text for anyone who asks (support, review notes):
 
 ```
-AnkiDroid MCP reads your decks through AnkiDroid's official API, which requires AnkiDroid's own "read and write the AnkiDroid database" permission. Android only offers it as one read-and-write permission. This version only reads: it lists your deck names and today's due counts and never changes your collection. Every read happens because your assistant asked for it while the app is connected. You can revoke the permission in Android Settings > Apps > AnkiDroid MCP > Permissions at any time.
+AnkiMCP reads and edits your collection through AnkiDroid's official API, which requires AnkiDroid's own "read and write the AnkiDroid database" permission. Android only offers it as one read-and-write permission. Through it, Claude can read and edit your collection (add, update and delete notes; tags, flags and scheduling), only when you ask it to while the app is connected. Every change is confirmed by reading it back from AnkiDroid. You can revoke the permission in Android Settings > Apps > AnkiMCP > Permissions at any time.
 ```
 
 No Play Console declaration exists for it (it is not a platform-restricted permission).

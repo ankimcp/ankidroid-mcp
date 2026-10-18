@@ -16,6 +16,9 @@ object NotificationChannels {
     /** "Sign in again to AnkiMCP". */
     const val ACCOUNT = "account"
 
+    /** "Tap to sync AnkiDroid" (D58). Not in [ALL]: the sync tool reports a blocked channel itself. */
+    const val SYNC = "sync"
+
     val ALL = listOf(TUNNEL, ACCOUNT)
 }
 
@@ -60,9 +63,12 @@ fun allNotificationsShown(context: Context): Boolean = allNotificationsShown { n
  */
 class NotificationPermissionGate(private val log: TunnelLog, private val blockReason: (channelId: String) -> String?) {
     /** True if [what], posted on [channelId], can be seen; otherwise logs why not and returns false. */
-    fun allows(what: String, channelId: String): Boolean {
-        val reason = blockReason(channelId) ?: return true
+    fun allows(what: String, channelId: String): Boolean = blockReason(what, channelId) == null
+
+    /** Why [what], posted on [channelId], would not be seen (logged), or null if it would. */
+    fun blockReason(what: String, channelId: String): String? {
+        val reason = blockReason(channelId) ?: return null
         log.warn("$reason: $what not shown")
-        return false
+        return reason
     }
 }

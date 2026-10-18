@@ -1,6 +1,6 @@
 # Distribution
 
-Google Play material for AnkiDroid MCP. Nothing here is read by the app build.
+Google Play material for AnkiMCP, the Android app for AnkiDroid. Nothing here is read by the app build.
 
 | Path | What |
 |---|---|

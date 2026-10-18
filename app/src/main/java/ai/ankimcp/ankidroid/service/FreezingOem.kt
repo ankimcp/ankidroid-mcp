@@ -9,25 +9,31 @@ import android.os.Build
  */
 enum class FreezingOem(
     private val brands: Set<String>,
+    /** The brands as users know them, for messages ("Xiaomi, Redmi and Poco phones ..."). */
+    val displayName: String,
     /** Where to find the maker's own switches in one app's App info page, in the maker's words. */
     private val path: String,
 ) {
     ColorOs(
         setOf("oppo", "realme", "oneplus"),
+        "Realme, Oppo and OnePlus",
         "App info > Battery usage: turn on \"Allow background activity\" and set battery " +
             "optimisation to \"Don't optimise\".",
     ),
     Xiaomi(
         setOf("xiaomi", "redmi", "poco"),
+        "Xiaomi, Redmi and Poco",
         "App info: turn on \"Autostart\", and under Battery saver choose \"No restrictions\".",
     ),
     Vivo(
         setOf("vivo", "iqoo"),
+        "Vivo and iQOO",
         "App info > Battery: turn on \"Allow high background power consumption\" (called " +
             "\"Allow background activity\" on some versions).",
     ),
     Huawei(
         setOf("huawei", "honor"),
+        "Huawei and Honor",
         "App info > Battery > App launch: turn off \"Manage automatically\" and leave \"Run in " +
             "background\" on.",
     ),
@@ -35,7 +41,7 @@ enum class FreezingOem(
 
     /** The same steps for both apps, which each have their own App info page. */
     val instructions: String
-        get() = "Do this for both AnkiDroid MCP and AnkiDroid. $path"
+        get() = "Do this for both AnkiMCP and AnkiDroid. $path"
 
     companion object {
         /** Matches `Build.MANUFACTURER` and `Build.BRAND`, ignoring case. */

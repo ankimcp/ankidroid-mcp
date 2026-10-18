@@ -4,6 +4,12 @@ import ai.ankimcp.ankidroid.anki.AnkiDroidAvailability
 import ai.ankimcp.ankidroid.appGraph
 import ai.ankimcp.ankidroid.auth.AuthException
 import ai.ankimcp.ankidroid.auth.DeviceFlowClient
+import ai.ankimcp.ankidroid.billing.BillingState
+import ai.ankimcp.ankidroid.billing.CurrentActivity
+import ai.ankimcp.ankidroid.local.LocalServerState
+import ai.ankimcp.ankidroid.BuildConfig
+import ai.ankimcp.ankidroid.log.DetailedReport
+import ai.ankimcp.ankidroid.log.DetailedReportInfo
 import ai.ankimcp.ankidroid.log.LogReport
 import ai.ankimcp.ankidroid.log.LogReportHeader
 import ai.ankimcp.ankidroid.push.PushRegistrationState
@@ -28,10 +34,13 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
 
 data class EnvironmentStatus(
     val ankiInstalled: Boolean,
@@ -114,11 +123,50 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** Non-null on makers whose skins freeze background apps (D42). */
     val freezingOem: FreezingOem? = FreezingOem.current()
 
+    val localServerEnabled: StateFlow<Boolean> = graph.localSettings.enabled
+    val localServerPort: StateFlow<Int> = graph.localSettings.port
+    val localServerRequireToken: StateFlow<Boolean> = graph.localSettings.requireToken
+    val localServerState: StateFlow<LocalServerState> = graph.localServer.state
+
+    /** The local server's bearer token once read; shown and shared, never logged. */
+    val localServerToken: StateFlow<String?> = graph.localTokens.token
+
+    /** Why creating, regenerating or reading the token failed last, for the Local server card. */
+    val localServerTokenError: StateFlow<String?> =
+        combine(graph.localTokens.saveError, graph.localTokens.readError) { save, read -> save ?: read }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS), null)
+
+    init {
+        if (localServerEnabled.value && localServerRequireToken.value) loadLocalServerToken()
+    }
+
+    /** The Plan card's state (D62). */
+    val billing: StateFlow<BillingState> = graph.billing.state
+
+    /**
+     * Plan status, Play products and restore of unregistered purchases. Called when the app comes
+     * to the front signed in (throttled in the coordinator) and from the card's Refresh.
+     */
+    fun refreshBilling(force: Boolean = false) {
+        if (credentials.value != null) graph.billing.refresh(force)
+    }
+
+    /** The Activity is looked up only when Play's sheet opens, after `/prepare` (D62). */
+    fun subscribe(productId: String) {
+        graph.billing.subscribe(productId, CurrentActivity::host)
+    }
+
+    fun retryBilling() = graph.billing.retry()
+
+    fun dismissBillingMessage() = graph.billing.dismiss()
+
     fun refreshEnvironment() {
         val previous = _environment.value
         val current = readEnvironment()
         _environment.value = current
         graph.freezeNotice.onBatteryExemption(previous.batteryUnrestricted, current.batteryUnrestricted)
+        // The auto-off timer does not run while the phone sleeps; the switch must not show a stale "on".
+        graph.detailedLogging.checkExpiry()
     }
 
     fun dismissFreezeNotice() {
@@ -146,6 +194,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 graph.signInNotifier.dismiss()
                 // App scope: registration must not be cancelled when the screen goes away.
                 graph.appScope.launch(Dispatchers.IO) { graph.push.onSignedIn() }
+                graph.billing.onSignedIn()
                 _signIn.value = SignInState.Idle
                 requestNotificationPermission()
             } catch (e: CancellationException) {
@@ -180,6 +229,61 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         TunnelForegroundService.stop(getApplication())
     }
 
+    /**
+     * Called while the app is in front: (re)starts the service for a local server that is on
+     * but not running, e.g. after the process was killed. Starting it from here is allowed on
+     * Android 12+; nothing restarts it in the background.
+     */
+    fun ensureLocalServer() {
+        if (localServerEnabled.value && !graph.localServer.isStarted) TunnelForegroundService.startLocalServer(getApplication())
+    }
+
+    fun setLocalServerEnabled(enabled: Boolean) {
+        if (graph.localSettings.enabled.value == enabled) return
+        graph.localSettings.setEnabled(enabled)
+        graph.log.info(if (enabled) "Local server turned on" else "Local server turned off")
+        // Turning it off is handled by the running service, which stops the server (and itself
+        // unless a tunnel runs).
+        if (enabled) {
+            if (localServerRequireToken.value) loadLocalServerToken()
+            TunnelForegroundService.startLocalServer(getApplication())
+            // Its notification carries "Stop local server"; signed-out users were never asked yet.
+            requestNotificationPermission()
+        }
+    }
+
+    /** False for a port outside 1024-65535; a running server moves to the new port. */
+    fun setLocalServerPort(port: Int): Boolean {
+        if (port == graph.localSettings.port.value) return true
+        val changed = graph.localSettings.setPort(port)
+        if (changed) graph.log.info("Local server port set to $port")
+        return changed
+    }
+
+    /**
+     * "Require access token". Turning it on creates the token the first time (and reads it
+     * later); it applies to the very next request, no restart. Off: anyone on the Wi-Fi can use
+     * the server; Host and Origin are still checked.
+     */
+    fun setLocalServerRequireToken(required: Boolean) {
+        if (graph.localSettings.requireToken.value == required) return
+        if (required) loadLocalServerToken()
+        graph.localSettings.setRequireToken(required)
+        graph.log.info(if (required) "Local server: access token required" else "Local server: access token not required")
+    }
+
+    /**
+     * Clients configured with the old token are refused until they are given the new one. A
+     * Keystore failure keeps the old token and shows [localServerTokenError].
+     */
+    fun regenerateLocalServerToken() {
+        graph.appScope.launch(Dispatchers.IO) { graph.localServer.regenerateToken() }
+    }
+
+    private fun loadLocalServerToken() {
+        graph.appScope.launch(Dispatchers.IO) { graph.localTokens.getOrCreate() }
+    }
+
     fun setIdleWindow(window: IdleWindow) {
         if (graph.settings.idleWindow.value == window) return
         graph.settings.setIdleWindow(window)
@@ -194,14 +298,76 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun logReport(): String = LogReport.format(
         header = LogReportHeader(
             appVersion = appVersion,
-            androidVersion = "${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})",
+            androidVersion = androidVersion(),
             device = LogReport.deviceName(Build.MANUFACTURER, Build.MODEL),
             idleWindowMinutes = idleWindow.value.minutes,
             pushRegistered = wakeUpsReady.value,
         ),
         entries = logEntries.value,
-        secrets = listOfNotNull(credentials.value?.user?.email, credentials.value?.user?.id?.takeIf { it.length >= 8 }),
+        secrets = graph.redactionSecrets(),
     )
+
+    /** "Detailed logging" on the Log tab (D61): debug lines and this app's logcat, for 24 h. */
+    val detailedLogging: StateFlow<Boolean> = graph.detailedLogging.enabled
+
+    /** When detailed logging switches itself off, or null when it is off. */
+    val detailedLoggingUntil: StateFlow<Long?> = graph.detailedLogging.until
+
+    fun setDetailedLogging(on: Boolean) {
+        if (graph.detailedLogging.enabled.value == on) return
+        graph.detailedLogging.setEnabled(on)
+        graph.log.info(if (on) "Detailed logging turned on for 24 hours" else "Detailed logging turned off")
+    }
+
+    /**
+     * Builds the detailed log (D61) in `cacheDir/shared_logs/` and returns it for the share sheet,
+     * or null if it could not be written. Nothing is sent anywhere by the app.
+     */
+    suspend fun detailedLogFile(): File? = withContext(Dispatchers.IO) {
+        try {
+            val detailed = graph.detailedLogging.isEnabled()
+            val fileLog = try {
+                graph.fileLog.read()
+            } catch (e: Exception) {
+                "(the app log could not be read: ${e.javaClass.simpleName})\n"
+            }
+            val logcat = if (detailed) graph.logcat.dump() else null
+            val environment = readEnvironment()
+            val now = System.currentTimeMillis()
+            val text = DetailedReport.format(
+                info = DetailedReportInfo(
+                    appVersion = appVersion,
+                    build = "${BuildConfig.VERSION_CODE} ${BuildConfig.BUILD_TYPE}",
+                    androidVersion = androidVersion(),
+                    device = LogReport.deviceName(Build.MANUFACTURER, Build.MODEL),
+                    romBuild = Build.DISPLAY.orEmpty(),
+                    oemSkin = freezingOem?.let { "${it.name} (${it.displayName})" },
+                    ankiDroidVersion = graph.ankiAvailability.version()?.let { "${it.name} (${it.code})" },
+                    idleWindowMinutes = idleWindow.value.minutes,
+                    pushRegistered = wakeUpsReady.value,
+                    localServerEnabled = localServerEnabled.value,
+                    localServerPort = localServerPort.value,
+                    localTokenRequired = localServerRequireToken.value,
+                    detailedLoggingUntil = graph.detailedLogging.until.value,
+                    batteryUnrestricted = environment.batteryUnrestricted,
+                    notificationsGranted = environment.notificationsGranted,
+                    notificationsShown = environment.notificationsShown,
+                    generatedAtMs = now,
+                ),
+                fileLog = fileLog,
+                logcat = logcat,
+                secrets = graph.redactionSecrets(),
+            )
+            graph.sharedLogs.write(text, now)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            graph.log.warn("Could not build the detailed log: ${e.javaClass.simpleName}")
+            null
+        }
+    }
+
+    private fun androidVersion() = "${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})"
 
     /** Removes the push token server-side first; credentials are cleared once that is done. */
     fun logout() {
@@ -214,10 +380,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             graph.appScope.launch(Dispatchers.IO) {
                 try {
                     graph.push.logout { graph.credentialStore.clear() }
+                    graph.billing.onSignedOut()
                     // A wake-up that got past the signing-out check may have started a run meanwhile.
                     graph.tunnel.stop("Signed out")
                     graph.log.info("Signed out")
                 } finally {
+                    graph.ankiRepository.releaseProviderClient("sign-out")
                     _signingOut.value = false
                 }
             }

@@ -13,6 +13,9 @@ class AnkiMcpApp : Application() {
         super.onCreate()
         graph = AppGraph(this)
         // Keystore decrypt + prefs read stay off the main thread; the UI waits on `loaded`.
+        // An old shared detailed log (D61). Not a fresh one: the receiving app may have started
+        // this process just to read it through the FileProvider.
+        graph.appScope.launch(Dispatchers.IO) { graph.sharedLogs.clearStale(System.currentTimeMillis()) }
         graph.appScope.launch(Dispatchers.IO) {
             graph.credentialStore.load()
             // Re-registers the push token if it changed, the app version changed, or it is 7 days

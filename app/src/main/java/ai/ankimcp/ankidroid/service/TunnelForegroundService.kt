@@ -2,6 +2,7 @@ package ai.ankimcp.ankidroid.service
 
 import ai.ankimcp.ankidroid.R
 import ai.ankimcp.ankidroid.appGraph
+import ai.ankimcp.ankidroid.local.LocalServerState
 import ai.ankimcp.ankidroid.tunnel.TunnelState
 import ai.ankimcp.ankidroid.ui.MainActivity
 import android.app.Notification
@@ -21,16 +22,20 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 
 /**
- * Keeps the process alive while the tunnel runs and shows its status. The tunnel itself lives
- * in [ai.ankimcp.ankidroid.AppGraph]; this service only starts/stops it and mirrors its state.
- * It stops itself whenever the tunnel stops, including after an on-demand idle timeout.
+ * Keeps the process alive while the tunnel runs or the local Wi-Fi server is on, and shows
+ * their status. Both live in [ai.ankimcp.ankidroid.AppGraph]; this service starts/stops them
+ * and mirrors their state. It stops itself whenever the tunnel stops (including after an
+ * on-demand idle timeout) unless the local server is on, and when the local server is turned
+ * off while no tunnel runs. The local server runs exactly while this service does.
  */
 class TunnelForegroundService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var stateJob: Job? = null
+    private var localJob: Job? = null
     private var lastStartId = 0
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -40,42 +45,70 @@ class TunnelForegroundService : Service() {
         lastStartId = startId
         if (intent?.action == ACTION_STOP) {
             graph.tunnel.stop()
-            shutdown()
+            if (!graph.localSettings.enabled.value || stateJob == null) shutdown()
+            return START_NOT_STICKY
+        }
+        if (intent?.action == ACTION_STOP_LOCAL) {
+            graph.localSettings.setEnabled(false)
+            graph.localServer.stop()
+            if (serviceShouldStopAfterLocalServer(graph.tunnel.state.value) || stateJob == null) shutdown()
             return START_NOT_STICKY
         }
 
         ensureChannel()
         // Without the permission (Android 13+) the service still runs, with a hidden notification.
         graph.notificationPermission.allows("tunnel status notification", CHANNEL_ID)
-        startInForeground(buildNotification(graph.tunnel.state.value))
+        startInForeground(buildNotification(graph.tunnel.state.value, graph.localServer.state.value))
 
         graph.networkMonitor.start { changed -> graph.tunnel.onNetworkAvailable(changed) }
         graph.screenMonitor.start(onScreenOff = graph.tunnel::onScreenOff, onScreenOn = graph.tunnel::onScreenOn)
-        startTunnelForServiceStart(
-            readExtra = { key, default -> intent?.getBooleanExtra(key, default) ?: default },
-            startTunnel = { graph.tunnel.start() },
-        )
+        val readExtra = { key: String, default: Boolean -> intent?.getBooleanExtra(key, default) ?: default }
+        startTunnelForServiceStart(readExtra = readExtra, startTunnel = { graph.tunnel.start() })
+        graph.localServer.start()
 
         if (stateJob == null) {
             stateJob = scope.launch {
-                graph.tunnel.state.collect { state ->
-                    if (state is TunnelState.Stopped) {
-                        if (serviceShouldStop(state, graph.tunnel.state.value)) shutdown()
-                    } else {
-                        getSystemService(NotificationManager::class.java)
-                            .notify(NOTIFICATION_ID, buildNotification(state))
+                combine(graph.tunnel.state, graph.localServer.state) { tunnel, local -> tunnel to local }
+                    .collect { (state, local) ->
+                        val localEnabled = graph.localSettings.enabled.value
+                        if (state is TunnelState.Stopped && !localEnabled) {
+                            if (serviceShouldStop(state, graph.tunnel.state.value, localEnabled)) shutdown()
+                        } else {
+                            getSystemService(NotificationManager::class.java)
+                                .notify(NOTIFICATION_ID, buildNotification(state, local))
+                        }
                     }
+            }
+        }
+        if (localJob == null) {
+            localJob = scope.launch {
+                var previous: Boolean? = null
+                graph.localSettings.enabled.collect { enabled ->
+                    when (localSwitchAction(previous, enabled)) {
+                        LocalSwitchAction.Start -> graph.localServer.start()
+                        LocalSwitchAction.Stop -> {
+                            // Also after a failed start (token), whose run already ended: stop() is idempotent.
+                            graph.localServer.stop()
+                            if (serviceShouldStopAfterLocalServer(graph.tunnel.state.value)) shutdown()
+                        }
+                        LocalSwitchAction.None -> Unit
+                    }
+                    previous = enabled
                 }
             }
         }
         // An earlier shutdown may have been refused for this start, and if this start began no
-        // run (e.g. a wake-up whose run already ended), Stopped is not emitted again.
-        if (graph.tunnel.state.value is TunnelState.Stopped) shutdown()
+        // run (e.g. a wake-up whose run already ended), Stopped is not emitted again. A start for
+        // the local server whose switch was turned off meanwhile ends here too.
+        val localEnabled = graph.localSettings.enabled.value
+        if (!localEnabled && graph.tunnel.state.value is TunnelState.Stopped) shutdown()
+        if (!localEnabled && readExtra(EXTRA_LOCAL_SERVER_ONLY, false) && graph.tunnel.state.value is TunnelState.Idle) shutdown()
         // Not sticky: after a process kill we only come back via the app or a push wake-up.
         return START_NOT_STICKY
     }
 
     override fun onDestroy() {
+        appGraph.localServer.stop()
         appGraph.networkMonitor.stop()
         appGraph.screenMonitor.stop()
         scope.cancel()
@@ -105,29 +138,43 @@ class TunnelForegroundService : Service() {
         manager.createNotificationChannel(channel)
     }
 
-    private fun buildNotification(state: TunnelState): Notification {
+    private fun buildNotification(state: TunnelState, local: LocalServerState): Notification {
         val openApp = PendingIntent.getActivity(
             this,
             0,
             Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
-        val disconnect = PendingIntent.getService(
-            this,
-            1,
-            Intent(this, TunnelForegroundService::class.java).setAction(ACTION_STOP),
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
-        )
-        return NotificationCompat.Builder(this, CHANNEL_ID)
+        val lines = notificationLines(state, local)
+        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_tunnel)
             .setContentTitle(getString(R.string.app_name))
-            .setContentText(describe(state))
+            .setContentText(lines.joinToString(" · "))
+            .setStyle(NotificationCompat.BigTextStyle().bigText(lines.joinToString("\n")))
             .setContentIntent(openApp)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
-            .addAction(0, getString(R.string.notification_action_disconnect), disconnect)
-            .build()
+        val tunnelRunning = state !is TunnelState.Idle && state !is TunnelState.Stopped
+        if (tunnelRunning || local == LocalServerState.Off) {
+            val disconnect = PendingIntent.getService(
+                this,
+                1,
+                Intent(this, TunnelForegroundService::class.java).setAction(ACTION_STOP),
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+            )
+            builder.addAction(0, getString(R.string.notification_action_disconnect), disconnect)
+        }
+        if (local != LocalServerState.Off) {
+            val stopLocal = PendingIntent.getService(
+                this,
+                2,
+                Intent(this, TunnelForegroundService::class.java).setAction(ACTION_STOP_LOCAL),
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+            )
+            builder.addAction(0, getString(R.string.notification_action_stop_local), stopLocal)
+        }
+        return builder.build()
     }
 
     companion object {
@@ -135,6 +182,7 @@ class TunnelForegroundService : Service() {
         private const val NOTIFICATION_ID = 1
         private const val ACTION_START = "ai.ankimcp.ankidroid.action.START"
         private const val ACTION_STOP = "ai.ankimcp.ankidroid.action.STOP"
+        private const val ACTION_STOP_LOCAL = "ai.ankimcp.ankidroid.action.STOP_LOCAL"
 
         /**
          * Starts the tunnel service. Returns false if Android refused the start (app in the
@@ -151,11 +199,30 @@ class TunnelForegroundService : Service() {
             }
         }
 
-        /** User-initiated disconnect from the app: ends this session; the next wake-up connects again. */
+        /**
+         * Starts the service for the local Wi-Fi server only (the tunnel is left alone). Returns
+         * false if Android refused the start; the local server's state then says so.
+         */
+        fun startLocalServer(context: Context): Boolean {
+            val graph = context.appGraph
+            return startForegroundServiceSafely(graph.log, graph.localServer::reportStartBlocked) {
+                val intent = Intent(context, TunnelForegroundService::class.java).setAction(ACTION_START)
+                serviceStartExtras(callerStartsTunnel = false, localServerOnly = true)
+                    .forEach { (key, value) -> intent.putExtra(key, value) }
+                ContextCompat.startForegroundService(context, intent)
+            }
+        }
+
+        /**
+         * User-initiated disconnect from the app: ends this session; the next wake-up connects
+         * again. The service keeps running while the local server is on.
+         */
         fun stop(context: Context) {
             val graph = context.appGraph
             graph.tunnel.stop()
-            context.stopService(Intent(context, TunnelForegroundService::class.java))
+            if (!graph.localSettings.enabled.value) {
+                context.stopService(Intent(context, TunnelForegroundService::class.java))
+            }
         }
 
         fun describe(state: TunnelState): String = when (state) {

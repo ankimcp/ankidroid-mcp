@@ -19,9 +19,14 @@ class FreezingOemTest {
     }
 
     @Test
+    fun `display names list the maker's brands`() {
+        assertEquals("Xiaomi, Redmi and Poco", FreezingOem.detect(null, "POCO")?.displayName)
+    }
+
+    @Test
     fun `every maker's instructions cover both apps`() {
         FreezingOem.entries.forEach {
-            assertTrue(it.name, it.instructions.contains("both AnkiDroid MCP and AnkiDroid"))
+            assertTrue(it.name, it.instructions.contains("both AnkiMCP and AnkiDroid"))
         }
     }
 

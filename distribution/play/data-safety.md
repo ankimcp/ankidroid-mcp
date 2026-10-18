@@ -17,12 +17,15 @@ memory for the request and not stored.
 | Access token (identifies the AnkiMCP user), client type, app version header | AnkiMCP relay, WebSocket handshake | `tunnel/TunnelClient.kt` |
 | MCP responses: deck ids, names, filtered flag, today's new/learn/review counts | AnkiMCP relay, then on to Claude | `tools/ListDecksTool.kt`, `docs/PROTOCOL.md` |
 | FCM registration token, `clientType`, `platform`, `appVersion` | AnkiMCP `PUT/DELETE /devices/push` | `push/PushTokenRegistrar.kt` |
+| Google Play purchase token of a subscription (D62); the access token on `GET /billing/status` and `POST /billing/google-play/prepare` | AnkiMCP `POST /billing/google-play/purchase` | `billing/BillingApi.kt` |
+| The purchase itself (payment method, Google account, the obfuscated AnkiMCP account id the app passes) | Google Play, through Play's own purchase sheet | Play Billing Library 9.1.0 |
 | Firebase Installation ID, FCM token request, Firebase user agent (SDK versions, OS version, device model) | Google (Firebase) | firebase-messaging 26.0.0 + firebase-installations 20.0.0 |
 
 Not sent: the email (it arrives *from* the server in the token response, `auth/Credentials.kt`
-`UserInfo`, is stored encrypted on the phone and shown on the Status screen), the log (stays
-on the phone; Share log hands it to an app the user picks), crash reports (none), analytics
-(none).
+`UserInfo`, is stored encrypted on the phone and shown on the Status screen), the log (the Log
+tab and the log file in app-private storage stay on the phone; Share log and Share detailed
+log, D61, hand a redacted copy to an app the user picks through the share sheet, and the app
+has no upload of its own), crash reports (none), analytics (none).
 
 No analytics or crash SDK is linked. `releaseRuntimeClasspath` has firebase-messaging,
 firebase-installations, firebase-datatransport and firebase-measurement-connector (an
@@ -36,7 +39,7 @@ delivery-metrics export to BigQuery is off by default and the app never turns it
 | Question | Answer |
 |---|---|
 | Does your app collect or share any of the required user data types? | Yes |
-| Is all of the user data collected by your app encrypted in transit? | Yes. `network_security_config.xml` forbids cleartext except to `10.0.2.2`/`localhost`/`127.0.0.1` (dev only); release builds use `wss://ankidroid.ankimcp.ai` and `https://` for auth and `/devices/push`; Firebase uses TLS. |
+| Is all of the user data collected by your app encrypted in transit? | Yes, on the condition that the local Wi-Fi server's answers do not count as collected data. Everything the app sends to us or third parties is encrypted: `network_security_config.xml` forbids cleartext except to `10.0.2.2`/`localhost`/`127.0.0.1` (dev only); release builds use `wss://ankidroid.ankimcp.ai` and `https://` for auth and `/devices/push`; Firebase uses TLS. The optional local Wi-Fi server (D53-D56) answers over plain HTTP, but only to a computer on the user's own network that the user set up with the access token; under Play's definitions that is a transfer the user starts, not collection by us or a third party. If review reads it as collection, the answer becomes No. **Pre-submit:** confirm this reading against Play's current definitions (DECISIONS "Not done"). |
 | Do you provide a way for users to request that their data is deleted? | Yes. See "Deletion" below. |
 | Does your app allow users to create an account? | Answer per what the sign-in page offers. The app has no sign-up screen: sign-in opens the AnkiMCP verification page (the `verification_uri` the server returns) in
 the browser (OAuth device flow). If that page lets a new user register, answer "Yes, users can create an account" and give the delete-account URL (see Deletion). |
@@ -97,15 +100,35 @@ each `list_decks` call.
 | Required or optional | Required (it is the app's only function; each request starts with the user asking Claude) |
 | Purposes | App functionality |
 
+### Financial info > Purchase history
+
+Added with Google Play subscriptions (D62). The app sends the Play purchase token to AnkiMCP,
+which verifies it with Google and keeps the subscription (product, state, period) on the
+account. Payment details never reach the app or AnkiMCP: Google Play collects them in its own
+sheet, under Google's terms.
+
+| Field | Answer |
+|---|---|
+| Collected | Yes, when the user buys or changes a plan in the app, and on restore of an existing Play subscription. |
+| Shared | No. Google is the payment processor (service provider) and the purchase is user-initiated. |
+| Ephemeral | No. AnkiMCP stores the subscription state on the account. |
+| Required or optional | Optional (the app works on the free plan) |
+| Purposes | App functionality, Account management |
+
+**Pre-submit:** confirm against Play's current Data safety help that a Play Billing purchase
+token sent to our backend is "Purchase history" (it is the conservative reading), and that
+"User payment info" stays undeclared because only Google Play handles it.
+
 ## Not declared, and why
 
 | Type | Reason |
 |---|---|
-| App info and performance > Crash logs, Diagnostics | No crash or analytics SDK. The tunnel log stays on the phone; Share log goes only where the user sends it (a user-initiated share to a recipient they choose). |
+| App info and performance > Crash logs, Diagnostics | No crash or analytics SDK. The tunnel log and its file copy stay on the phone; Share log and Share detailed log go only where the user sends them through the Android share sheet (a user-initiated share to a recipient they choose); nothing is uploaded automatically. |
 | Device metadata in the Firebase user agent (OS version, model) | Firebase documents it as never linked to a user or device identifier and used for SDK adoption stats; Google's Firebase data-disclosure page lists it but does not map it to a Play category. Judgement call; if review asks, add App info and performance > Other app performance data, collected, not shared, App functionality. |
 | Access and refresh tokens | Credentials, not a Play data type. Stored encrypted with a non-exportable Keystore key (`auth/CredentialStore.kt`), excluded from backup (`data_extraction_rules.xml`). |
 | App version (`x-ankimcp-client-version`, `appVersion`) | Not a user data type. |
-| Location, contacts, files, photos, financial, health, messages, audio, calendar, web history, installed apps | Not accessed. `<queries>` names only `com.ichi2.anki`. |
+| Financial info > User payment info | Entered only in Google Play's own purchase sheet; never reaches the app or AnkiMCP. |
+| Location, contacts, files, photos, health, messages, audio, calendar, web history, installed apps | Not accessed. `<queries>` names only `com.ichi2.anki`. |
 
 ## Deletion
 

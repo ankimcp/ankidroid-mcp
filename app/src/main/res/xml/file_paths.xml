@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Only the shared detailed log (SharedLogFiles.DIR_NAME); the file log in filesDir is never exposed. -->
+<paths>
+    <cache-path name="shared_logs" path="shared_logs/" />
+</paths>
