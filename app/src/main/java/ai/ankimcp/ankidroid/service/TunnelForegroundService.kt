@@ -63,7 +63,8 @@ class TunnelForegroundService : Service() {
         graph.networkMonitor.start { changed -> graph.tunnel.onNetworkAvailable(changed) }
         graph.screenMonitor.start(onScreenOff = graph.tunnel::onScreenOff, onScreenOn = graph.tunnel::onScreenOn)
         val readExtra = { key: String, default: Boolean -> intent?.getBooleanExtra(key, default) ?: default }
-        startTunnelForServiceStart(readExtra = readExtra, startTunnel = { graph.tunnel.start() })
+        val remoteEnabled = graph.remoteSettings.isEnabled
+        startTunnelForServiceStart(readExtra = readExtra, remoteEnabled = remoteEnabled) { graph.tunnel.start() }
         graph.localServer.start()
 
         if (stateJob == null) {
@@ -99,10 +100,11 @@ class TunnelForegroundService : Service() {
         }
         // An earlier shutdown may have been refused for this start, and if this start began no
         // run (e.g. a wake-up whose run already ended), Stopped is not emitted again. A start for
-        // the local server whose switch was turned off meanwhile ends here too.
+        // the local server whose switch was turned off meanwhile, or for a tunnel while Remote
+        // access is off, ends here too.
         val localEnabled = graph.localSettings.enabled.value
         if (!localEnabled && graph.tunnel.state.value is TunnelState.Stopped) shutdown()
-        if (!localEnabled && readExtra(EXTRA_LOCAL_SERVER_ONLY, false) && graph.tunnel.state.value is TunnelState.Idle) shutdown()
+        if (!localEnabled && (readExtra(EXTRA_LOCAL_SERVER_ONLY, false) || !remoteEnabled) && graph.tunnel.state.value is TunnelState.Idle) shutdown()
         // Not sticky: after a process kill we only come back via the app or a push wake-up.
         return START_NOT_STICKY
     }
@@ -214,12 +216,13 @@ class TunnelForegroundService : Service() {
         }
 
         /**
-         * User-initiated disconnect from the app: ends this session; the next wake-up connects
-         * again. The service keeps running while the local server is on.
+         * User-initiated disconnect from the app: ends this session with [reason] as the stopped
+         * state (Disconnect, or Remote access turned off, D63). The service keeps running while
+         * the local server is on.
          */
-        fun stop(context: Context) {
+        fun stop(context: Context, reason: String = "Disconnected by user") {
             val graph = context.appGraph
-            graph.tunnel.stop()
+            graph.tunnel.stop(reason)
             if (!graph.localSettings.enabled.value) {
                 context.stopService(Intent(context, TunnelForegroundService::class.java))
             }

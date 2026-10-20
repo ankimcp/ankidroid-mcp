@@ -462,6 +462,23 @@ class BillingCoordinatorTest {
     }
 
     @Test
+    fun `a relay without billing is not available, not failed, and no error banner`() = runTest {
+        val h = harness()
+        h.status.result = BillingApiResult.NotAvailable
+        h.loaded()
+        advanceUntilIdle()
+        assertEquals(PlanLoad.NotAvailable, h.coordinator.state.value.plan)
+        assertEquals(PurchaseFlow.Idle, h.coordinator.state.value.flow)
+        assertTrue(h.tiers.isEmpty())
+        // A 5xx stays an error with Refresh.
+        val other = harness()
+        other.status.result = BillingApiResult.RetryLater("Server error (HTTP 500)")
+        other.loaded()
+        advanceUntilIdle()
+        assertEquals(PlanLoad.Failed, other.coordinator.state.value.plan)
+    }
+
+    @Test
     fun `refresh is throttled unless forced`() = runTest {
         val h = harness()
         h.coordinator.refresh()

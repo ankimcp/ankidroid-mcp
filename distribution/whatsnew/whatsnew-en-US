@@ -1,5 +1,7 @@
-First release.
-- Lets Claude read your AnkiDroid decks through your AnkiMCP account. One read-only tool for now: deck names and today's due counts.
-- Claude wakes the phone when it needs it, and the app disconnects when the screen turns off or after 15-60 idle minutes.
-- Battery tips for Realme, Oppo, OnePlus, Xiaomi, Vivo and Huawei phones.
-- Share log button for bug reports.
+First release. Needs AnkiDroid 2.24 or newer.
+- Claude reads and edits your AnkiDroid collection: 34 tools for decks, notes, cards, tags and note types.
+- Remote tab: connect through your AnkiMCP account; Claude wakes the phone when needed.
+- Local tab: a free server on your Wi-Fi for Claude Desktop or Claude Code, no account needed.
+- Plus and Pro plans through Google Play, when available.
+- Battery tips for phones that freeze background apps.
+- Share a detailed log for bug reports.

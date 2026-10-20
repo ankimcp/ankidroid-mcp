@@ -29,7 +29,8 @@ app/src/main/java/ai/ankimcp/ankidroid/
                keep_connected keys, D50), FreezeNotice (persisted "phone froze us"
                flag), LocalServerSettings (local server switch, port, "Wi-Fi only" sign-in
                skip), DetailedLogging (Log tab switch, auto-off after 24 h, D61),
-               KeyValueStore (SharedPreferences seam)
+               RemoteAccessSettings (the Remote access switch, default on, D63), KeyValueStore
+               (SharedPreferences seam)
   auth/        DeviceFlowClient, Credentials, CredentialStore (Keystore AES-GCM), TokenRefresher
   tunnel/      Protocol (messages, close codes), TunnelClient (OkHttp WS, one connection,
                freeze-aware ping watchdog), RequestDedupe (process-wide at-most-once per
@@ -38,8 +39,9 @@ app/src/main/java/ai/ankimcp/ankidroid/
                WakeSupport (ElapsedClock, WakeLocks, WakeupScheduler interfaces)
   push/        PushMessaging (Firebase seam) + FirebasePushMessaging, PushTokenRegistrar
                (/devices/push), PushRegistrationState(+Store), PushCoordinator (when to
-               register, logout order), PushRegistrationWorker (WorkManager retry + daily
-               check), WakeHandler (wake message -> FGS + tunnel), AnkiMcpMessagingService (FCM)
+               register, logout order, Remote access off unregisters and on re-registers, D63),
+               PushRegistrationWorker (WorkManager retry + daily
+               check), WakeHandler (wake message -> FGS + tunnel; ignored while Remote access is off), AnkiMcpMessagingService (FCM)
   billing/     Play subscriptions (D62): BillingGateway (plain-Kotlin seam) + PlayBilling (the only
                Play Billing Library import), BillingApi (/billing/status, /billing/google-play/
                prepare and /purchase), BillingCoordinator (purchase state machine, restore, never

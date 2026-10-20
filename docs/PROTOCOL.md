@@ -221,7 +221,20 @@ When: after sign-in; in `FirebaseMessagingService.onNewToken`; on app start and 
 background check, if the last attempt failed, the token or app version changed since the last
 successful registration, or that registration is 7 days old or more. The app has no FCM token
 before the first sign-in (auto-init is off until then). Unregister: on logout, before the
-credentials are cleared (they authenticate the DELETE).
+credentials are cleared (they authenticate the DELETE), and when the user turns Remote access
+off (docs/DECISIONS.md D63; the credentials and the FCM token stay); registered again when it
+is turned on. While it is off no trigger registers, and a DELETE that failed is retried.
+
+Relay behaviour without a device (coordinator, 2026-10-19): the DELETE is effective at once.
+With no connected tunnel and no registered device, the relay answers the MCP request itself,
+without waiting, with JSON-RPC error `-32000`, message exactly "AnkiMCP on your phone is
+turned off or not signed in. Open the app, sign in and turn Remote access on, then ask me
+again." (HTTP 200; a notification gets HTTP 503 with the same body; `initialize` and
+`tools/list` get the same error, there is no cached tools list). Relays before the next tunnel
+roll (SaaS commit ef1a8f87 not rolled yet) still send the old text "Your phone's AnkiDroid MCP
+is not connected. Open the app and tap Connect, then ask me again." A push already in flight
+when the token was removed (up to 5 s to send, FCM ttl 30 s) may still arrive; the app ignores
+it.
 
 ### Wake message
 
@@ -240,7 +253,7 @@ High-priority FCM **data** message (no `notification` payload):
   until 60 s after its last response has been written to the socket, so OEM freezers cannot
   stop it mid-conversation; a request that arrives later than that may find the app frozen
   and go through a new wake-up (docs/DECISIONS.md D49).
-- Signed out, or signing out: no connection, only a log line.
+- Signed out, signing out, or Remote access off (D63): no connection, only a log line.
 - The refresh token is dead (`invalid_grant` when refreshing before the connection) or access
   was revoked: no connection; a local notification "Sign in again to AnkiMCP" is posted.
 - Other `type` values are ignored; `reason` is only logged.
@@ -272,6 +285,10 @@ GET /billing/status
   otherwise active. Play's ON_HOLD, PAUSED and EXPIRED never appear (the server downgrades to
   free). `productId` only for google_play, and only where Play billing is on.
 - Errors: 401 bad token, 500 when the user service is unreachable (no 503).
+- A relay without the billing routes (dev before deployment answers 405): the app treats 404,
+  405 and 501 here as "billing not available on this server", logs one warning line and shows
+  "Plans are not available yet" with no error. 5xx and network errors are shown as errors with
+  Try again.
 
 The app reads it after sign-in, when it comes to the front signed in (at most once a minute),
 after a successful purchase, and on the Plan card's Refresh. Parsing is defensive: a missing

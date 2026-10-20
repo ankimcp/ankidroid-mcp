@@ -87,10 +87,32 @@ fun OnboardingScreen(
     }
 }
 
+/** The battery card's buttons. */
+internal enum class BatteryAction {
+    /** "AnkiMCP info" and "AnkiDroid info": the maker's switches are on each app's own page. */
+    MakerAppInfo,
+
+    /** "Open battery settings": the system list (D42). */
+    BatterySettings,
+
+    /** "Open app info": exempt, yet the phone paused the app. */
+    AppInfo,
+    None,
+}
+
+internal fun batteryAction(unrestricted: Boolean, oem: FreezingOem?, freezeDetected: Boolean): BatteryAction = when {
+    oem != null -> BatteryAction.MakerAppInfo
+    !unrestricted -> BatteryAction.BatterySettings
+    freezeDetected -> BatteryAction.AppInfo
+    else -> BatteryAction.None
+}
+
 /**
- * Optional battery exemption. On makers whose skins freeze background apps ([oem]) it also names
- * the maker's own switches, which the system exemption does not cover. [freezeDetected] makes
- * it required; the freeze notice itself is its own card above the Status tabs (D59).
+ * The one battery card, for the tunnel and the local server alike, on onboarding and below the
+ * Status tabs (D59): settings links only, never the direct exemption request (D42). On makers
+ * whose skins freeze background apps ([oem]) it also names the maker's own switches, which the
+ * system exemption does not cover. [freezeDetected] makes it required; the freeze notice itself
+ * is its own card right above it.
  */
 @Composable
 fun BatteryCard(
@@ -115,23 +137,25 @@ fun BatteryCard(
                             "Claude is using them. Both AnkiMCP and AnkiDroid must be allowed to run " +
                             "in the background, or Claude's requests time out."
                     } else {
-                        "Android may pause the app when the phone is idle, which cuts the connection once " +
-                            "you use it. To keep it alive, find " +
-                            "AnkiMCP in the list and choose \"Don't optimise\" (or \"Unrestricted\")."
+                        "Android may pause the app when the phone is idle, which cuts the connection or the " +
+                            "local server once you use it. To keep it alive, find AnkiMCP in the list and " +
+                            "choose \"Don't optimise\" (or \"Unrestricted\")."
                     },
                 )
             }
             if (oem != null) SupportingText(oem.instructions)
-            when {
+            when (batteryAction(unrestricted, oem, freezeDetected)) {
                 // The maker's switches live on each app's own page; there is no public intent for its battery sub-page.
-                oem != null -> Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                BatteryAction.MakerAppInfo -> Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(onClick = { openAppSettings(context) }) { Text("AnkiMCP info") }
                     OutlinedButton(onClick = { openAppSettings(context, AnkiDroidAvailability.PACKAGE_NAME) }) {
                         Text("AnkiDroid info")
                     }
                 }
-                !unrestricted -> OutlinedButton(onClick = { openBatterySettings(context) }) { Text("Open battery settings") }
-                freezeDetected -> OutlinedButton(onClick = { openAppSettings(context) }) { Text("Open app info") }
+                BatteryAction.BatterySettings ->
+                    OutlinedButton(onClick = { openBatterySettings(context) }) { Text("Open battery settings") }
+                BatteryAction.AppInfo -> OutlinedButton(onClick = { openAppSettings(context) }) { Text("Open app info") }
+                BatteryAction.None -> Unit
             }
         }
     }
@@ -199,8 +223,8 @@ private fun openAppSettings(context: Context, packageName: String = context.pack
     }
 }
 
-/** The system list; no direct exemption request for the tunnel (docs/DECISIONS.md D42, D56). */
-internal fun openBatterySettings(context: Context) {
+/** The system list; the app never asks for the exemption directly (docs/DECISIONS.md D42, D56). */
+private fun openBatterySettings(context: Context) {
     try {
         context.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
     } catch (_: ActivityNotFoundException) {

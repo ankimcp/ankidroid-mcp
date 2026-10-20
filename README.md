@@ -80,7 +80,8 @@ see docs/DECISIONS.md D57 and D58.
 **How it connects.** Claude wakes the phone with a push message when it needs your decks; the
 connection closes when the screen turns off or after 15, 30 or 60 idle minutes (your choice on
 the Status tab), and the next request wakes the phone again. There is no "always connected"
-mode.
+mode. The **Remote access** switch on the Remote tab turns this off for good: the phone is
+unregistered from wake-ups and Claude is told to ask you to turn it on again.
 
 **Battery.** Realme, Oppo and OnePlus (ColorOS), Xiaomi, Vivo and Huawei/Honor phones freeze
 background apps even while they show a notification. Allow background activity, and set
@@ -156,7 +157,8 @@ they get the new one.
 
 While the local server is on, the app keeps a notification ("Local MCP server on
 192.168.x.x:8765") with a **Stop local server** button. Nothing can wake the phone in this
-mode, so the Status screen's Battery card asks you to turn battery optimisation off for the app. Do it: without it,
+mode, so turn battery optimisation off for the app: the Battery card on the Status screen
+links to the setting (on freezing phones, to the App info pages of AnkiMCP and AnkiDroid). Do it: without it,
 some phones stop the server from answering about 30 s after the screen turns off. On a
 Realme phone (ColorOS 15) the app froze 30 s after screen-off and requests hung; with
 battery optimisation off it still froze, but each incoming request woke it and was answered

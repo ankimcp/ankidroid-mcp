@@ -49,12 +49,16 @@ interface PushWorkScheduler {
  * app version changed, or the last success is [REREGISTER_AFTER_MS] (7 days) old. Triggers:
  * sign-in, `onNewToken`, app start, a daily WorkManager check, and the WorkManager retry.
  * Transient failures (network, 429, 5xx) schedule a retry; 400/401 wait for the next trigger.
+ * With Remote access off (D63) no trigger registers; [onRemoteDisabled] removes the token and
+ * [onRemoteEnabled] registers it again.
  */
 class PushCoordinator(
     private val messaging: PushMessaging,
     private val registrar: PushRegistrar,
     private val store: PushRegistrationStore,
     private val isSignedIn: () -> Boolean,
+    /** The Remote access switch (D63); registrations stop while it is off. */
+    private val isRemoteEnabled: () -> Boolean = { true },
     private val appVersion: String,
     private val work: PushWorkScheduler,
     private val log: TunnelLog,
@@ -86,20 +90,113 @@ class PushCoordinator(
     val wakeUpsReady: Boolean get() = _wakeUpsReady.value
 
     suspend fun onAppStart() {
-        // Signed in, the sync below finishes it first, before it fetches a token.
+        // Off: the token may still be registered if the process died mid-switch; nothing syncs.
+        if (!isRemoteEnabled()) {
+            onRemoteDisabled()
+            return
+        }
+        // Signed in, `sync` finishes it first, before it fetches a token.
         if (!isSignedIn()) retryPendingDelete()
         sync(knownToken = null, Trigger.AppStart)
     }
 
     /** A (possibly different) account signed in: whatever was registered before no longer counts. */
     suspend fun onSignedIn() {
+        registerAfresh()
+    }
+
+    /** Remote access turned on again (D63): registers like a sign-in does ([sync] bails if it is off again). */
+    suspend fun onRemoteEnabled() {
+        registerAfresh()
+    }
+
+    private suspend fun registerAfresh() {
         // A sign-in that lands while the previous logout is still deleting the token waits for it.
         _signingOut.first { !it }
         mutex.withLock {
             store.clear()
             updateReadiness()
         }
-        sync(knownToken = null, Trigger.SignIn)
+        // Switch off: nothing registers, but a DELETE that Remote-off left owed (signed out at the
+        // time) can be sent now that there are credentials.
+        if (!isRemoteEnabled()) retryPendingDelete() else sync(knownToken = null, Trigger.SignIn)
+    }
+
+    /**
+     * Remote access turned off (D63), also run at app start while it is off: the relay must stop
+     * waking this phone, so the registered token is removed server-side as [logout] does it,
+     * under the registration lock, but the credentials and the FCM token stay and nothing is
+     * treated as a sign-out. The DELETE is recorded as a [PendingTokenDelete] before the
+     * registration is cleared, so a process death or a DELETE that does not get through leaves
+     * a record the delete worker and the next app start finish; while the switch is off no
+     * trigger registers again ([sync]). The switch is read again under the lock: an "off" that
+     * runs after the user's final "on" must not remove what that "on" registered. A logout in
+     * progress removes the token itself.
+     */
+    suspend fun onRemoteDisabled() {
+        val removed = mutex.withLock {
+            if (isRemoteEnabled() || isSigningOut) return
+            val token = registeredTokenLocked() ?: return@withLock finishPendingDeleteLocked()
+            // Record first: from here on a process death cannot leave the token registered. A record
+            // for a different token wins, since it is the one still owed; this cannot happen in
+            // practice, as sync finishes the record before it registers anything new.
+            store.updatePendingDelete { current ->
+                if (current?.serverDelete == true) current else PendingTokenDelete(token, serverDelete = true, localDelete = current?.localDelete == true)
+            }
+            val owed = store.pendingDelete?.token ?: token
+            store.clear()
+            updateReadiness()
+            work.cancel()
+            work.cancelDailyCheck()
+            val outcome = try {
+                registrar.unregister(owed)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                PushResult.RetryLater(e.message ?: e.javaClass.simpleName)
+            }
+            when (outcome) {
+                PushResult.Ok -> log.info("Push token removed from the server: Remote access is off")
+                is PushResult.RetryLater -> {
+                    log.warn("Could not remove the push token: ${outcome.message}")
+                    return@withLock false
+                }
+                // Credentials are gone: nothing can send it now, so the record stays (see
+                // finishPendingDeleteLocked) until a sign-in with the switch off or a logout sends it.
+                PushResult.SignedOut -> {
+                    log.warn("Could not remove the push token: signed out; it will be removed at the next sign-in")
+                    return@withLock true
+                }
+                // Retrying a rejected DELETE would not help.
+                is PushResult.Rejected -> log.warn("Could not remove the push token: $outcome")
+            }
+            store.updatePendingDelete { current -> if (current?.token == owed) current?.copy(serverDelete = false) else current }
+            true
+        }
+        if (!removed) {
+            log.warn("The push token will be removed once the device is online")
+            work.scheduleTokenDelete()
+        }
+    }
+
+    /**
+     * The token the server may hold for this device: the last registered one, or, when the last
+     * attempt is still retrying and none was recorded, the current FCM token (a PUT may have
+     * landed before the process died), as [logout] does. Null without Firebase. Must hold [mutex].
+     */
+    private suspend fun registeredTokenLocked(): String? {
+        if (!messaging.isAvailable) return null
+        val current = store.state.value
+        current.token?.let { return it }
+        if (current.lastResult != PushRegistrationState.LastResult.Retrying) return null
+        return try {
+            messaging.token()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            log.warn("Could not get the push token to remove: ${e.message ?: e.javaClass.simpleName}")
+            null
+        }
     }
 
     suspend fun onNewToken(token: String) {
@@ -269,6 +366,10 @@ class PushCoordinator(
         val sameRecord = { current: PendingTokenDelete? -> current?.token == pending.token }
         if (pending.serverDelete) {
             val token = pending.token
+            // A Remote-off record (no local delete owed) while signed out: the FCM token is still
+            // valid and only credentials can remove it, so it stays owed for the next sign-in with
+            // the switch off (registerAfresh) or a logout. True, so the delete worker does not loop.
+            if (token != null && !isSignedIn() && !pending.localDelete) return true
             if (token != null && isSignedIn()) {
                 val outcome = try {
                     registrar.unregister(token)
@@ -323,7 +424,7 @@ class PushCoordinator(
 
     /** Returns null when nothing needed doing. */
     private suspend fun sync(knownToken: String?, trigger: Trigger): PushResult? = mutex.withLock {
-        if (!messaging.isAvailable || isSigningOut || !isSignedIn()) return null
+        if (!messaging.isAvailable || isSigningOut || !isSignedIn() || !isRemoteEnabled()) return null
         val now = clock.millis()
         // Before any token is fetched, so the token sign-out meant to delete is not registered again.
         val previousRemoved = store.pendingDelete == null || finishPendingDeleteLocked()

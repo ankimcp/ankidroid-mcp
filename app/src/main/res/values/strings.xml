@@ -25,6 +25,9 @@
     <string name="freeze_notice_text">Your phone froze the connection in the background</string>
     <string name="onboarding_intro">This app lets an AI assistant such as Claude read and edit your AnkiDroid collection while your phone is connected. It needs AnkiDroid and permission to access its database.</string>
     <string name="about_tagline">Lets Claude read and edit your AnkiDroid collection through the AnkiMCP tunnel or over your Wi-Fi, while your phone is connected.</string>
+    <!-- Remote access switch on the Status tab (D63). -->
+    <string name="remote_access_title">Remote access</string>
+    <string name="remote_access_off">Remote access is off. Claude can\'t reach this phone through ankimcp.ai until you turn Remote access on.</string>
     <string name="local_server_open_warning">Anyone on this Wi-Fi can use the server to read and change your collection.</string>
     <!-- About links: the label is shown, TalkBack reads the plain title instead of the emoji's name. -->
     <string name="about_docs_title">Documentation</string>
@@ -70,7 +73,7 @@
     <string name="plan_manage">Manage subscription</string>
     <string name="plan_products_loading">Loading plans from Google Play…</string>
     <string name="plan_products_unavailable">Google Play billing is not available on this device.</string>
-    <string name="plan_products_empty">Plans are not available in Google Play yet.</string>
+    <string name="plan_products_empty">Plans are not available yet.</string>
     <string name="plan_flow_opening">Opening Google Play…</string>
     <string name="plan_flow_registering">Activating your plan…</string>
     <string name="plan_flow_pending">Payment pending. Your plan starts once Google Play confirms it.</string>

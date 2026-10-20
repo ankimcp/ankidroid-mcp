@@ -1,6 +1,7 @@
 package ai.ankimcp.ankidroid.push
 
 import ai.ankimcp.ankidroid.log.TunnelLog
+import ai.ankimcp.ankidroid.service.REMOTE_ACCESS_OFF_REASON
 import ai.ankimcp.ankidroid.service.SERVICE_START_BLOCKED_REASON
 import ai.ankimcp.ankidroid.tunnel.CloseCodes
 import ai.ankimcp.ankidroid.tunnel.TunnelState
@@ -32,6 +33,7 @@ class WakeHandlerTest {
     private var running = false
     private var signedIn = true
     private var signingOut = false
+    private var remoteEnabled = true
     private var serviceStartAllowed = true
     private var onServiceStart: () -> Unit = {}
     private var serviceStarts = 0
@@ -52,6 +54,7 @@ class WakeHandlerTest {
         isTunnelRunning = { running },
         isSignedIn = { signedIn },
         isSigningOut = { signingOut },
+        isRemoteEnabled = { remoteEnabled },
         startService = {
             serviceStarts++
             calls += "service"
@@ -233,6 +236,37 @@ class WakeHandlerTest {
         assertEquals(1, tunnelStops)
         assertFalse(running)
         assertEquals(SERVICE_START_BLOCKED_REASON, (tunnelState.value as TunnelState.Stopped).reason)
+    }
+
+    @Test
+    fun `with Remote access off a wake-up is ignored, even signed in with a stale run`() = runTest {
+        remoteEnabled = false
+        running = true
+        tunnelState.value = TunnelState.Connected("https://tunnel.example/mcp")
+
+        assertEquals(WakeHandler.Outcome.RemoteOff, handler().onMessage(wake))
+
+        assertEquals(0, serviceStarts)
+        assertEquals(0, tunnelStarts)
+        assertEquals(0, nudges)
+        assertEquals(0, notifier.shown)
+        val messages = log.entries.value.map { it.message }
+        assertTrue(messages.toString(), messages.contains("Wake-up (mcp_request): Remote access is off, not connecting"))
+    }
+
+    @Test
+    fun `Remote access turned off after the entry check stops the run the wake-up started`() = runTest {
+        // The switch's own stop found nothing running: it landed between the check and startTunnel.
+        onServiceStart = { remoteEnabled = false }
+
+        assertEquals(WakeHandler.Outcome.RemoteOff, handler().onMessage(wake))
+        runCurrent()
+
+        assertEquals(1, tunnelStarts)
+        assertEquals(1, tunnelStops)
+        assertFalse(running)
+        assertEquals(REMOTE_ACCESS_OFF_REASON, (tunnelState.value as TunnelState.Stopped).reason)
+        assertEquals(0, notifier.shown)
     }
 
     @Test

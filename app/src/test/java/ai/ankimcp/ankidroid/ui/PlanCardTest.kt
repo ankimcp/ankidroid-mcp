@@ -45,6 +45,15 @@ class PlanCardTest {
     }
 
     @Test
+    fun `a relay without billing shows only the quiet note`() {
+        val ui = planCardUi(BillingState(catalog = products, plan = PlanLoad.NotAvailable), "free")
+        assertEquals(PlanKind.NotAvailable, ui.kind)
+        assertTrue(ui.products.isEmpty())
+        assertNull(ui.catalogNote)
+        assertNull(ui.manageProductId)
+    }
+
+    @Test
     fun `free offers both products with Play's prices`() {
         val ui = planCardUi(state(free), "free")
         assertEquals(PlanKind.Free, ui.kind)

@@ -2,8 +2,9 @@
 
 Permissions in the merged release manifest
 (`app/build/intermediates/merged_manifest/release/processReleaseMainManifest/AndroidManifest.xml`,
-built 2026-10-15, rechecked 2026-10-18 after the local Wi-Fi server added
-`REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`). Eight are declared in
+built 2026-10-15, rechecked 2026-10-18 after the local Wi-Fi server;
+`REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` was added for it and removed again the same day, D56).
+Eight are declared in
 `app/src/main/AndroidManifest.xml`; `RECEIVE_BOOT_COMPLETED` and the last two come from
 libraries.
 
@@ -16,15 +17,14 @@ libraries.
 | `POST_NOTIFICATIONS` | runtime (Android 13+) | The foreground service notification (with Disconnect) and "Sign in again to AnkiMCP". Asked after sign-in; the app works without it, the user just does not see when Claude wakes the phone | none |
 | `RECEIVE_BOOT_COMPLETED` | normal (from androidx.work) | Not declared by the app. WorkManager's `RescheduleReceiver` re-schedules the push-registration retry, daily check and token-delete jobs after a reboot. The app itself does nothing at boot and never starts the tunnel then | none |
 | `WAKE_LOCK` | normal | Short partial wake locks around reconnects, liveness checks from while-idle alarms, and finishing in-flight requests on screen off (`AndroidWakeLocks`); also used by FCM and WorkManager | none |
-| `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` | normal, Play-policy-restricted | `ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` dialog, offered only while the local Wi-Fi server is on (D56). Never asked for tunnel use | Play Console has no form; be ready to justify it on review: "The local Wi-Fi server mode has no server component, so it cannot use FCM high-priority messages to wake the phone; Doze would otherwise make the user's own MCP server on their LAN unreachable. The request is only shown after the user turns that mode on, with this explanation." |
 | `com.ichi2.anki.permission.READ_WRITE_DATABASE` | runtime (AnkiDroid's own, dangerous level) | Read decks through AnkiDroid's ContentProvider | none in Play Console; explain in the listing (done) |
 | `com.android.vending.BILLING` | normal (declared by the app and by the Play Billing Library) | Plus and Pro subscriptions through Google Play (D62). The library also adds `<queries>` for Play's billing service and its own non-exported `ProxyBillingActivity`; no location or other permission comes with it (merged release manifest checked) | none; the subscriptions are set up under Monetize in Play Console |
 | `com.google.android.c2dm.permission.RECEIVE` | normal (from firebase-messaging) | Receive FCM wake-up messages | none |
 | `ai.ankimcp.ankidroid.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION` | signature (from androidx.core) | Internal guard for non-exported runtime receivers; no user impact | none |
 
-`REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` was left out until the local Wi-Fi server (D42: Play
-forbids it for apps that can use high-priority FCM; D56: the local mode cannot, and only that
-mode asks). Not requested, on purpose: `SCHEDULE_EXACT_ALARM`/`USE_EXACT_ALARM` (alarms are
+Not requested, on purpose: `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` (D42: Play forbids the
+direct request for apps that can use high-priority FCM; the battery card only links to the
+system settings, for the local Wi-Fi server too, D56), `SCHEDULE_EXACT_ALARM`/`USE_EXACT_ALARM` (alarms are
 inexact while-idle), any location, storage or contacts permission.
 
 "Share detailed log" (D61) needs no permission: the app reads its own logcat lines (no

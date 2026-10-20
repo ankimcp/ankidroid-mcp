@@ -2,7 +2,7 @@
 
 Decisions made while building phase 1, the push wake-up feature after it (D31-D39), the
 fixes after the on-device trials (D40-D44, D49, D51), the branding and UI round (D45-D48), the
-removal of "Always connected" (D50), request dedupe (D52) and the local Wi-Fi server (D53-D56), without a chance to ask. Each one is cheap to revisit. D57 (the tool set), D58 (sync), D59 (Status tabs), D60 (app name) and D61 (detailed log) record owner decisions. D62 (Google Play Billing) follows
+removal of "Always connected" (D50), request dedupe (D52) and the local Wi-Fi server (D53-D56), without a chance to ask. Each one is cheap to revisit. D57 (the tool set), D58 (sync), D59 (Status tabs), D60 (app name), D61 (detailed log) and D63 (the Remote access switch) record owner decisions. D62 (Google Play Billing) follows
 the server contract given by the coordinator.
 
 ## Target SDK
@@ -99,7 +99,7 @@ the server contract given by the coordinator.
   can't request the permission without AnkiDroid installed (the permission is defined by
   AnkiDroid), so sign-in is only offered afterwards. Battery optimisation is optional and only
   deep-links to settings; the app does not declare `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` (D42;
-  declared again for the local server only, D56). Sign-in is optional: past onboarding the
+  briefly declared for the local server, then removed again, D56). Sign-in is optional: past onboarding the
   Status screen shows both tabs, with Sign in on the Remote tab (D59).
 
 ## Auth and storage
@@ -489,9 +489,9 @@ gets frozen too.
     core function. It would also not fix the problem found on the trial phone: the exemption
     only covers Doze and App Standby, not OEM freezers such as ColorOS's Hans, where the maker's
     own "Allow background activity" switch is what matters. (A first version of D42 used the
-    dialog; it was dropped before release.) This still holds for the tunnel; the local Wi-Fi
-    server, which cannot use FCM, brings the permission and the dialog back for that mode only
-    (D56).
+    dialog; it was dropped before release.) This holds for the whole app, the local Wi-Fi
+    server included: a local-mode variant with the dialog (D56) was built and removed again
+    by the owner, so the same D42 card serves both.
   - "Open battery settings" opens `ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS` (the system
     list; App info if that does not resolve). `PowerManager.isIgnoringBatteryOptimizations`
     drives the tick.
@@ -877,17 +877,20 @@ gets frozen too.
     below stay as on the signed-in screen. The old persisted `sign_in_skipped` flag is removed on
     first read (`LocalServerSettings`). Sign-out keeps its confirmation flow (D35), and the
     "Sign in again" notification (D36) still opens the app, now on the sign-in card.
-  - Battery (`statusBattery`): one card for the whole screen, since it is no longer on a tab,
-    always shown, signed in or out, server on or off, exempt or not. With the local server on
-    it is the local server's card (`LocalBatteryCard`: the direct exemption request with
-    Allow, D56, and its local-mode wording); otherwise the D42 card with the tunnel wording
-    and settings links, never the direct request (D42 Play policy stands for the tunnel).
-    Once exempt either shows "✓ Battery optimisation is off for AnkiMCP", mirroring
-    Notifications' "✓ Notifications are allowed"; on freezing makers both keep the maker's
-    background-activity guidance (and the D42 card its App info buttons), since those switches
-    cannot be read. Earlier rounds hid the card when nothing was needed and, signed out with
-    the server off, unless a freeze was seen; the owner reversed both. The D42 Top/Bottom
-    positions are gone with the per-tab layout.
+  - Battery (`BatteryCard`, buttons from `batteryAction`): one card for the whole screen,
+    since it is no longer on a tab, always shown and always the same D42 card, signed in or
+    out, server on or off, exempt or not. One wording covers both modes ("Android may pause
+    the app when the phone is idle, which cuts the connection or the local server once you
+    use it"); on freezing makers the maker's guidance with "AnkiMCP info" and "AnkiDroid
+    info", elsewhere "Open battery settings"; never the direct request. Once exempt it shows
+    "✓ Battery optimisation is off for AnkiMCP", mirroring Notifications' "✓ Notifications
+    are allowed", still with the maker's guidance and buttons on freezing makers (those
+    switches cannot be read), and after a freeze "The phone still paused the app; check its
+    background settings in App info". Earlier rounds hid the card when nothing was needed
+    and, signed out with the server off, unless a freeze was seen, and showed a local-mode
+    card with a direct "Allow" request while the server was on; the owner reversed all three
+    (the Allow button on the Remote tab was confusing; D56). The D42 Top/Bottom positions are
+    gone with the per-tab layout.
   - Notifications (`notificationsUse`): always shown too, with "✓ Notifications are allowed"
     when the permission, the app's switch and every channel are on, and the settings button
     otherwise. The "off" text depends on what would be missed: signed in, the tunnel text
@@ -1183,18 +1186,16 @@ computer on the same Wi-Fi; claude.ai cannot reach a LAN address. Code in `local
     service start brings it up too. Not at boot (no boot receiver, D50) and not from the
     background (Android 12+ refuses it).
   - Battery: local mode has no push wake-up, so nothing can bring a dozing or frozen phone's
-    server back. `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` is declared again and the
-    `ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` dialog is offered on the Local server card
-    only while the switch is on, with the explanation that no cloud service can wake the phone
-    in this mode. Never for tunnel-only use (D42 stands for the tunnel). Play justification
-    (record for the Play Console declaration): this mode cannot use FCM high-priority
-    messages by construction, since there is no server that could send them (no account, no
-    relay; the client is on the LAN), which is the case Google's Doze acceptable-use table
-    ("Optimize for Doze and App Standby") treats as acceptable for the exemption. The table's
-    exact wording was not re-read this session (context7 had no copy); check it before
-    submitting. That row is about an app whose core function cannot use FCM; this app's tunnel
-    path does use FCM, so review may read the app as a whole as an FCM user, and the exemption
-    request may have to be dropped from the first Play submission if review pushes back.
+    server back, and the exemption matters more here (device evidence below). The first
+    version declared `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` again and offered the
+    `ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` dialog ("Allow") on a local-mode battery card
+    while the switch was on, arguing that this mode cannot use FCM. Removed by the owner
+    (2026-10-18): with the battery card shared below the Status tabs (D59), an "Allow" button
+    showed on the Remote tab too, which was confusing, and the owner prefers the one D42 card
+    with its settings links ("AnkiMCP info"/"AnkiDroid info" on freezing makers, "Open
+    battery settings" elsewhere) in every state. It also drops the Play-review risk that the
+    app as a whole uses FCM. The permission is gone from the manifest; the user turns the
+    exemption on in settings, as for the tunnel.
   - Device evidence, Realme RMX3741 / ColorOS 15, 2026-10-18 13:17-13:20: without the
     exemption, Hans froze the app about 30 s after the screen went off and a request to the
     local server hung (client 20 s timeout, no thaw). With the exemption (on the deviceidle
@@ -1207,14 +1208,11 @@ computer on the same Wi-Fi; claude.ai cannot reach a LAN address. Code in `local
     granted while the app was already frozen, the next request hung with no Packet thaw. So
     on this OEM the exemption makes incoming packets thaw the app; ColorOS applies it from the
     next freeze on (in practice at once for a user who grants it once and leaves it on); and
-    without it the server stops answering about 30 s after the screen turns off. The prompt
-    stays, and the card says "Without this setting the server stops answering about 30 s after
-    the screen turns off on some phones". (An earlier version of this entry guessed the
+    without it the server stops answering about 30 s after the screen turns off. (An earlier version of this entry guessed the
     exemption would not help against Hans; the device runs show packet thaw needs it.)
-  - One battery card per screen: while the server is on, the local server's battery card
-    (`LocalBatteryCard`, the direct request, with the maker's own switches on freezing OEMs,
-    D42) replaces the D42 card; either is always shown below the Status tabs (D59). A "phone
-    froze the connection" notice (D42 `FreezeNotice`) is its own card right above it.
+  - One battery card per screen, the D42 card, the same with the server on or off, always shown
+    below the Status tabs (D59). A "phone froze the connection" notice (D42 `FreezeNotice`) is
+    its own card right above it.
   - Switching the server off always calls `LocalServer.stop()` (idempotent) on an on-to-off
     change, also when a failed start (token) already ended the run, and then stops the service
     if no tunnel run is going on; the collector's first value never stops anything
@@ -1793,7 +1791,7 @@ computer on the same Wi-Fi; claude.ai cannot reach a LAN address. Code in `local
     offer (the one without an `offerId`) is used, never another offer instead; a product Play
     does not return, or returns without that offer, is listed as missing and shown "Not
     available in Google Play" with no price and no button (none available at all: "Plans are
-    not available in Google Play yet"). Prices are only Play's `formattedPrice` of the recurring
+    not available yet"). Prices are only Play's `formattedPrice` of the recurring
     phase, shown as "<price> / month" when the period is `P1M`; nothing in the app or its
     strings holds a price.
   - Purchase: `POST /billing/google-play/prepare` first. `blocked` (web or admin entitlement)
@@ -1888,7 +1886,14 @@ computer on the same Wi-Fi; claude.ai cannot reach a LAN address. Code in `local
     `BillingStatusSource` seam (`BillingApi` implements it; tests use a fake). Read on sign-in,
     app start and front, after a successful `/purchase`, and on Refresh. A failed reload keeps
     the last loaded status; only a first failure shows "Could not load your plan" with Try
-    again. The tier it reports is copied into the stored credentials (compare-and-set, so a
+    again. 404, 405 and 501 from `/billing/status` mean the relay has no billing (yet): on the
+    phone against dev, where the route is not deployed, it answered 405 and the card looked
+    broken. These are `NotAvailable`, logged once per call as a warning (so a broken status route in production stands out in shared logs) "Billing status not
+    available on this relay (HTTP 405)", and the card shows only the quiet "Plans are not
+    available yet" (the same note as when Play has no products): no error, no Try again, no
+    products. 401 keeps the refresh-and-retry handling (a dead refresh token is signed out);
+    5xx and network errors stay "Could not load your plan" with Try again. The google-play
+    calls do not get this mapping: a 404 there is still an error. The tier it reports is copied into the stored credentials (compare-and-set, so a
     sign-out in between wins), so the account card's "Plan: <tier>" line matches until the
     next token refresh brings the server's own value.
   - Plan card (Status > Remote, signed in, right under the account card, which keeps its
@@ -1913,7 +1918,7 @@ computer on the same Wi-Fi; claude.ai cannot reach a LAN address. Code in `local
     `ankimcp_pro` with the `monthly` base plan and prices, activating them, license testers,
     and an internal-testing upload signed with the upload key (Play only serves products to a
     Play-signed install of this package). Until then `queryProductDetails` returns nothing
-    and the card says "Plans are not available in Google Play yet". Real-time developer
+    and the card says "Plans are not available yet". Real-time developer
     notifications (RTDN) for renewals, grace and cancellations are the server's job.
   - Tests (JVM): `BillingApiTest` (MockWebServer: prepare's empty POST, new/replace/blocked,
     malformed id or mode, signed out, 401 refresh-and-retry; purchase body exactly
@@ -1938,10 +1943,95 @@ computer on the same Wi-Fi; claude.ai cannot reach a LAN address. Code in `local
     NoScreen; Try again restarting a running refresh; missing products; Subscribe refused
     while Play is asked (Checking); a background restore with nothing to send keeping a Done
     line; a listener purchase waiting for the user's Preparing/Launching flow; an empty user id
-    as the same account), `PlanCardTest`
+    as the same account; a relay without billing as NotAvailable with no error, a 5xx still
+    Failed), `BillingApiTest` also maps status 404/405/501 to NotAvailable with one warning
+    line per call, and keeps a google-play 404 an error, `PlanCardTest`
     (each provider and status, renewal lines, buttons, catalog notes, busy, registering and
     pending disabling the buttons, a product without the base plan shown unavailable, none
     available as the empty note).
+
+## Remote access
+
+- **D63. A persisted "Remote access" switch: off is a real off.** Owner decision (2026-10-19).
+  Before it, Disconnect only ended the session: the relay kept sending an FCM wake-up for
+  every request of an MCP client (clients poll on their own), and `WakeHandler` reconnected
+  on each one as long as the user was signed in. There was no way to stop the phone from
+  answering Claude short of signing out.
+  - Setting: `settings/RemoteAccessSettings` (`remote_enabled` in the "settings" prefs file,
+    `KeyValueStore` + StateFlow like `LocalServerSettings`). Default on; an absent key counts
+    as on, so an update changes nothing. It survives sign-out and sign-in: it is a property of
+    the phone, not of the account.
+  - Off: `MainViewModel.setRemoteEnabled(false)` writes the setting, stops the tunnel through
+    `TunnelForegroundService.stop(context, "Remote access off")` (the reason shows as the
+    stopped state; the service stops unless the local server is on, as after Disconnect), and
+    calls `PushCoordinator.onRemoteDisabled()` on the app scope. That removes the registered
+    token with `DELETE /devices/push` the way logout does it, under the registration lock:
+    the `PendingTokenDelete` record is written *before* the registration is cleared, so a
+    process death in between, or a DELETE that does not get through (network, 5xx), leaves a
+    record the network-bound delete worker and the next app start finish. `SignedOut` (the
+    credentials are gone) keeps the record too, but without a worker: only credentials can send
+    it, so `finishPendingDeleteLocked` leaves a Remote-off record (no local delete owed) alone
+    while signed out, and a sign-in with the switch off runs the pending-delete path instead
+    of `sync` (a logout takes it over as well). Unlike
+    logout it keeps the credentials and the FCM token (no `deleteToken`, auto-init untouched),
+    and sets no signing-out state; the registration record is cleared, so `wakeUpsReady` is
+    false. The switch is read again under the lock: off and on are two independent coroutines,
+    and an "off" that runs after the user's final "on" must not remove what that "on"
+    registered (symmetrically, `sync` bails when the switch is off). A logout already in
+    progress removes the token itself and the switch leaves it to it. While off, `sync`
+    returns early for every trigger (`onNewToken`, the daily check, the retry worker,
+    sign-in), so nothing registers again; `onAppStart` runs the disable path instead, which
+    also catches a token left registered by a process that died mid-switch (the stored token,
+    or the current FCM token when the last attempt was still retrying without one, as logout
+    does). `WakeHandler.onMessage` answers `RemoteOff` with an info line before any other
+    check: no service start, no tunnel start, no nudge; and checks the switch once more after
+    the service start, stopping the run it just started with "Remote access off" (the
+    switch's own stop found nothing running yet). `TunnelForegroundService` does not start the
+    tunnel while the switch is off (a Connect queued before the flip) and ends itself if
+    nothing else runs; `connect()` is a no-op. Belt and braces: with the switch off, a run
+    that still got through keeps a Disconnect button under the off line.
+  - On: `onRemoteEnabled()` registers like a sign-in (`store.clear()`, then the sign-in
+    trigger, which re-registers even an up-to-date token and makes sure the daily check is
+    enqueued). Nothing connects by itself: the user taps Connect, or the next wake-up
+    connects as before. Signing in with the switch off registers nothing; turning it on
+    later registers.
+  - Relay side (SaaS, coordinator 2026-10-19): the DELETE is effective at once. With no
+    connected tunnel and no registered device the relay answers the MCP request itself with
+    JSON-RPC error `-32000`, message "AnkiMCP on your phone is turned off or not signed in.
+    Open the app, sign in and turn Remote access on, then ask me again." (HTTP 200; a
+    notification gets HTTP 503 with the same body; `initialize` and `tools/list` get the same
+    error, there is no cached tools list). Relays before the next tunnel roll still send the
+    old text "Your phone's AnkiDroid MCP is not connected. Open the app and tap Connect, then
+    ask me again." A push already in flight when the token was removed (up to 5 s to send,
+    FCM ttl 30 s) may still arrive; the app ignores it (`RemoteOff`).
+  - UI (owner correction after the phone test): the switch row is the first card of the
+    Remote tab, signed in or out, laid out like the Local tab's switch row (title + Switch,
+    same card, padding and spacing). Off, one line under it says "Remote access is off. Claude
+    can't reach this phone through ankimcp.ai until you turn Remote access on." (wording
+    matches the relay's error), with the Disconnect fallback for a run that got past the
+    switch. Below it the sign-in card (signed out) or the account card and the Plan card
+    (signed in) as before, then, only while the switch is on, the Tunnel card (status,
+    Connect/Disconnect, MCP URL) and the Connection card (idle window, push status), both
+    unchanged; off hides them, since no registration exists. The Remote dot is grey while
+    off, whatever the tunnel state still says (`statusTabDot` takes `remoteEnabled`);
+    TalkBack's word is "Not connected".
+  - Tests (JVM): `RemoteAccessSettingsTest` (default, absent key, persistence both ways),
+    `WakeHandlerTest` (wake while off: `RemoteOff`, no service or tunnel start, no nudge even
+    with a stale connected run, the log line), `PushCoordinatorTest` (off removes the token
+    with the credentials still there and keeps the FCM token and auto-init; a failed DELETE
+    is pending, retried at app start and finished by the worker while app start, new token,
+    daily check, retry worker and sign-in register nothing; on registers again like a sign-in;
+    sign-in while off registers nothing; nothing registered sends no DELETE; off during a
+    logout leaves the removal to the logout; an off running after the final on removes
+    nothing, and the reverse order ends unregistered; off, on, off; app start with the switch
+    off and a stored token, or a retrying attempt without one, sends the DELETE and is
+    idempotent; a `SignedOut` DELETE stays owed through the worker and app starts while signed
+    out and is sent by the next sign-in with the switch off; on while the off's
+    DELETE is in flight registers after it; on with a DELETE still owed sends it before the
+    PUT, or registers nothing and schedules a retry when it fails again; logout takes over a
+    DELETE Remote-off left owed), `LocalServerServiceRulesTest` (no tunnel start while off),
+    `WakeHandlerTest` (the switch flipped after the entry check stops the run),
+    `StatusTabsTest` (grey Remote dot when off).
 
 ## Not done
 

@@ -14,6 +14,7 @@ import ai.ankimcp.ankidroid.log.LogReport
 import ai.ankimcp.ankidroid.log.LogReportHeader
 import ai.ankimcp.ankidroid.push.PushRegistrationState
 import ai.ankimcp.ankidroid.service.FreezingOem
+import ai.ankimcp.ankidroid.service.REMOTE_ACCESS_OFF_REASON
 import ai.ankimcp.ankidroid.service.TunnelForegroundService
 import ai.ankimcp.ankidroid.service.allNotificationsShown
 import ai.ankimcp.ankidroid.service.hasNotificationPermission
@@ -123,6 +124,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** Non-null on makers whose skins freeze background apps (D42). */
     val freezingOem: FreezingOem? = FreezingOem.current()
 
+    /** The Remote access switch (D63). */
+    val remoteEnabled: StateFlow<Boolean> = graph.remoteSettings.enabled
+
     val localServerEnabled: StateFlow<Boolean> = graph.localSettings.enabled
     val localServerPort: StateFlow<Int> = graph.localSettings.port
     val localServerRequireToken: StateFlow<Boolean> = graph.localSettings.requireToken
@@ -221,12 +225,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun connect() {
+        if (!remoteEnabled.value) return
         TunnelForegroundService.start(getApplication())
     }
 
     /** Ends the current session; the next wake-up connects again. */
     fun disconnect() {
         TunnelForegroundService.stop(getApplication())
+    }
+
+    /**
+     * Off: ends the session (the service stops unless the local server is on), ignores wake-ups
+     * and removes the push token from the relay, so Claude's requests no longer wake the phone.
+     * On: registers the token again; nothing connects until Connect or the next wake-up.
+     */
+    fun setRemoteEnabled(enabled: Boolean) {
+        if (graph.remoteSettings.isEnabled == enabled) return
+        graph.remoteSettings.setEnabled(enabled)
+        graph.log.info(if (enabled) "Remote access turned on" else "Remote access turned off")
+        // App scope: the DELETE or PUT must not be cancelled when the screen goes away.
+        if (enabled) {
+            graph.appScope.launch(Dispatchers.IO) { graph.push.onRemoteEnabled() }
+        } else {
+            TunnelForegroundService.stop(getApplication(), REMOTE_ACCESS_OFF_REASON)
+            graph.appScope.launch(Dispatchers.IO) { graph.push.onRemoteDisabled() }
+        }
     }
 
     /**

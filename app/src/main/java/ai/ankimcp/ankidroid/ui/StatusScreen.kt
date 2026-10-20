@@ -29,6 +29,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -78,22 +79,6 @@ data class BatteryUi(
     val freezeDetected: Boolean,
 )
 
-/** The one battery card below the Status tabs, always shown (D59). */
-internal enum class StatusBattery {
-    /** The D42 card: settings links and the maker's own switches, no direct request. */
-    Tunnel,
-
-    /** The local server's card with the direct exemption request (D56). */
-    Local,
-}
-
-/**
- * Which battery card: the local server's while it is on (D56), the D42 card otherwise. Either
- * shows a tick once exempt, plus the maker's own switches on freezing OEMs.
- */
-internal fun statusBattery(localEnabled: Boolean): StatusBattery =
-    if (localEnabled) StatusBattery.Local else StatusBattery.Tunnel
-
 /** What the Notifications card's "off" text talks about. */
 internal enum class NotificationsUse {
     /** Signed in: wake-ups, the session notification and "Sign in again". */
@@ -119,6 +104,8 @@ fun StatusScreen(
     signIn: SignInState,
     /** Why the last session ended, shown on the sign-in card. */
     sessionEndedReason: String?,
+    /** The Remote access switch (D63): off hides Connect and the MCP URL, the dot is grey. */
+    remoteEnabled: Boolean,
     tunnelState: TunnelState,
     defaultMcpUrl: String,
     connection: ConnectionUi,
@@ -130,6 +117,7 @@ fun StatusScreen(
     signingOut: Boolean,
     selectedTab: StatusTab,
     onSelectTab: (StatusTab) -> Unit,
+    onRemoteEnabledChange: (Boolean) -> Unit,
     onConnect: () -> Unit,
     onDisconnect: () -> Unit,
     onIdleWindowChange: (IdleWindow) -> Unit,
@@ -163,7 +151,7 @@ fun StatusScreen(
         item {
             StatusTabRow(
                 selected = selectedTab,
-                dot = { statusTabDot(it, tunnelState, local.enabled, local.state) },
+                dot = { statusTabDot(it, remoteEnabled, tunnelState, local.enabled, local.state) },
                 onSelect = onSelectTab,
             )
         }
@@ -179,44 +167,53 @@ fun StatusScreen(
                     onMessage = onMessage,
                 )
             }
-            StatusTab.Remote -> if (user == null) {
+            StatusTab.Remote -> {
+                // The switch row first, like the Local tab's, signed in or out (D63).
                 item {
-                    SignInCard(
-                        state = signIn,
-                        sessionEndedReason = sessionEndedReason,
-                        onSignIn = onSignIn,
-                        onCancel = onCancelSignIn,
-                        onOpenFailed = onSignInOpenFailed,
+                    RemoteAccessCard(
+                        enabled = remoteEnabled,
+                        tunnelState = tunnelState,
+                        onEnabledChange = onRemoteEnabledChange,
+                        onDisconnect = onDisconnect,
+                    )
+                }
+                if (user == null) {
+                    item {
+                        SignInCard(
+                            state = signIn,
+                            sessionEndedReason = sessionEndedReason,
+                            onSignIn = onSignIn,
+                            onCancel = onCancelSignIn,
+                            onOpenFailed = onSignInOpenFailed,
+                            onMessage = onMessage,
+                        )
+                    }
+                } else {
+                    remoteTab(
+                        user = user,
+                        remoteEnabled = remoteEnabled,
+                        tunnelState = tunnelState,
+                        defaultMcpUrl = defaultMcpUrl,
+                        connection = connection,
+                        plan = plan,
+                        plans = plans,
+                        signingOut = signingOut,
+                        formatTime = { shortTimeFormat.format(Date(it)) },
+                        formatDateTime = { dateTimeFormat.format(Date(it)) },
+                        formatDate = { dateFormat.format(Date.from(it)) },
+                        onConnect = onConnect,
+                        onDisconnect = onDisconnect,
+                        onIdleWindowChange = onIdleWindowChange,
+                        onLogout = onLogout,
                         onMessage = onMessage,
                     )
                 }
-            } else {
-                remoteTab(
-                    user = user,
-                    tunnelState = tunnelState,
-                    defaultMcpUrl = defaultMcpUrl,
-                    connection = connection,
-                    plan = plan,
-                    plans = plans,
-                    signingOut = signingOut,
-                    formatTime = { shortTimeFormat.format(Date(it)) },
-                    formatDateTime = { dateTimeFormat.format(Date(it)) },
-                    formatDate = { dateFormat.format(Date.from(it)) },
-                    onConnect = onConnect,
-                    onDisconnect = onDisconnect,
-                    onIdleWindowChange = onIdleWindowChange,
-                    onLogout = onLogout,
-                    onMessage = onMessage,
-                )
             }
         }
 
         // Shared below either tab.
         if (battery.freezeDetected) item { FreezeNoticeCard(onDismiss = onDismissFreezeNotice) }
-        when (statusBattery(local.enabled)) {
-            StatusBattery.Local -> item { LocalBatteryCard(battery.unrestricted, battery.oem, battery.freezeDetected) }
-            StatusBattery.Tunnel -> item { BatteryCard(battery.unrestricted, battery.oem, battery.freezeDetected) }
-        }
+        item { BatteryCard(battery.unrestricted, battery.oem, battery.freezeDetected) }
         item { NotificationsCard(granted = notificationsShown, use = notificationsUse(user != null, local.enabled)) }
 
         item { Spacer(Modifier.padding(bottom = 4.dp)) }
@@ -225,6 +222,7 @@ fun StatusScreen(
 
 private fun LazyListScope.remoteTab(
     user: UserInfo,
+    remoteEnabled: Boolean,
     tunnelState: TunnelState,
     defaultMcpUrl: String,
     connection: ConnectionUi,
@@ -270,18 +268,44 @@ private fun LazyListScope.remoteTab(
         )
     }
 
-    item {
-        TunnelCard(
-            tunnelState = tunnelState,
-            defaultMcpUrl = defaultMcpUrl,
-            idleDisconnectAt = connection.idleDisconnectAt,
-            formatTime = formatTime,
-            onConnect = onConnect,
-            onDisconnect = onDisconnect,
-            onMessage = onMessage,
-        )
+    // Off: the switch row's line stands in for the tunnel and Connection cards (D63).
+    if (remoteEnabled) {
+        item {
+            TunnelCard(
+                tunnelState = tunnelState,
+                defaultMcpUrl = defaultMcpUrl,
+                idleDisconnectAt = connection.idleDisconnectAt,
+                formatTime = formatTime,
+                onConnect = onConnect,
+                onDisconnect = onDisconnect,
+                onMessage = onMessage,
+            )
+        }
+        item { ConnectionCard(connection = connection, formatDateTime = formatDateTime, onIdleWindowChange = onIdleWindowChange) }
     }
-    item { ConnectionCard(connection = connection, formatDateTime = formatDateTime, onIdleWindowChange = onIdleWindowChange) }
+}
+
+/**
+ * The Remote access switch row (D63), laid out like the Local tab's. Off, one line under it says
+ * Claude cannot reach the phone through ankimcp.ai; a run that got past the switch (a wake-up
+ * or Connect racing it) keeps a Disconnect button there.
+ */
+@Composable
+private fun RemoteAccessCard(enabled: Boolean, tunnelState: TunnelState, onEnabledChange: (Boolean) -> Unit, onDisconnect: () -> Unit) {
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(stringResource(R.string.remote_access_title), style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                Switch(checked = enabled, onCheckedChange = onEnabledChange)
+            }
+            if (enabled) return@Column
+
+            SupportingText(stringResource(R.string.remote_access_off))
+            if (tunnelState !is TunnelState.Idle && tunnelState !is TunnelState.Stopped) {
+                OutlinedButton(onClick = onDisconnect, modifier = Modifier.fillMaxWidth()) { Text("Disconnect") }
+            }
+        }
+    }
 }
 
 /** "The phone paused the app" (D42 `FreezeNotice`), right above the battery card. */
@@ -356,7 +380,7 @@ private fun TunnelCard(
             } else {
                 Button(onClick = onConnect, modifier = Modifier.fillMaxWidth()) { Text("Connect") }
             }
-
+        
             Text(
                 "MCP server URL for Claude",
                 style = MaterialTheme.typography.labelLarge,

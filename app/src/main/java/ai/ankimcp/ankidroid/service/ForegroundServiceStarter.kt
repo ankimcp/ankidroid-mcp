@@ -7,6 +7,9 @@ import ai.ankimcp.ankidroid.tunnel.TunnelState
 /** Shown when Android refused to start the tunnel service from the background. */
 const val SERVICE_START_BLOCKED_REASON = "Could not start in the background. Open the app to connect."
 
+/** The stop reason when the user turns Remote access off (D63). */
+const val REMOTE_ACCESS_OFF_REASON = "Remote access off"
+
 /** Boolean extra on the service's start intent: the caller starts the tunnel itself. */
 internal const val EXTRA_CALLER_STARTS_TUNNEL = "ai.ankimcp.ankidroid.extra.CALLER_STARTS_TUNNEL"
 
@@ -36,11 +39,16 @@ internal fun serviceStartExtras(callerStartsTunnel: Boolean, localServerOnly: Bo
 
 /**
  * The service's side of [serviceStartExtras]: reads the start intent through [readExtra]
- * (`Intent.getBooleanExtra`) and starts the tunnel unless the caller does, or the start was
- * only for the local server.
+ * (`Intent.getBooleanExtra`) and starts the tunnel unless the caller does, the start was only
+ * for the local server, or Remote access is off (D63: a Connect queued before the switch was
+ * turned off must not start a run).
  */
-internal fun startTunnelForServiceStart(readExtra: (key: String, default: Boolean) -> Boolean, startTunnel: () -> Unit) {
-    if (readExtra(EXTRA_LOCAL_SERVER_ONLY, false)) return
+internal fun startTunnelForServiceStart(
+    readExtra: (key: String, default: Boolean) -> Boolean,
+    remoteEnabled: Boolean = true,
+    startTunnel: () -> Unit,
+) {
+    if (readExtra(EXTRA_LOCAL_SERVER_ONLY, false) || !remoteEnabled) return
     startTunnelUnlessCallerDid(readExtra(EXTRA_CALLER_STARTS_TUNNEL, false), startTunnel)
 }
 

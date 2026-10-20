@@ -102,10 +102,11 @@ class StatusTabsTest {
 
     private val running = LocalServerState.Running("192.168.1.20", 8765)
 
-    private fun remoteDot(state: TunnelState) = statusTabDot(StatusTab.Remote, state, localEnabled = true, running)
+    private fun remoteDot(state: TunnelState, remoteEnabled: Boolean = true) =
+        statusTabDot(StatusTab.Remote, remoteEnabled, state, localEnabled = true, running)
 
     private fun localDot(enabled: Boolean, state: LocalServerState) =
-        statusTabDot(StatusTab.Local, TunnelState.Connected("https://x/mcp"), enabled, state)
+        statusTabDot(StatusTab.Local, remoteEnabled = false, TunnelState.Connected("https://x/mcp"), enabled, state)
 
     @Test
     fun `Remote dot is green when connected, amber while a run goes on, grey when stopped`() {
@@ -117,6 +118,13 @@ class StatusTabsTest {
             TunnelState.Stopped(1000, "Idle", idleTimeout = true),
             TunnelState.Stopped(4001, "Session expired", reloginRequired = true),
         ).forEach { assertEquals("$it", TabDot.Off, remoteDot(it)) }
+    }
+
+    @Test
+    fun `Remote dot is grey with Remote access off, whatever the tunnel state says`() {
+        listOf(TunnelState.Connected("https://x/mcp"), TunnelState.Connecting(1), TunnelState.Idle)
+            .forEach { assertEquals("$it", TabDot.Off, remoteDot(it, remoteEnabled = false)) }
+        assertEquals("the Local dot does not care", TabDot.Connected, localDot(enabled = true, running))
     }
 
     @Test

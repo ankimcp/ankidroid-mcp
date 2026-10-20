@@ -96,6 +96,7 @@ private fun AppRoot(viewModel: MainViewModel) {
     val localToken by viewModel.localServerToken.collectAsStateWithLifecycle()
     val localTokenError by viewModel.localServerTokenError.collectAsStateWithLifecycle()
     val localRequireToken by viewModel.localServerRequireToken.collectAsStateWithLifecycle()
+    val remoteEnabled by viewModel.remoteEnabled.collectAsStateWithLifecycle()
     val billing by viewModel.billing.collectAsStateWithLifecycle()
     val localUi = LocalServerUi(
         enabled = localEnabled,
@@ -229,6 +230,7 @@ private fun AppRoot(viewModel: MainViewModel) {
                 user = user,
                 signIn = signIn,
                 sessionEndedReason = sessionEndedReason(tunnelState),
+                remoteEnabled = remoteEnabled,
                 tunnelState = tunnelState,
                 defaultMcpUrl = viewModel.defaultMcpUrl,
                 connection = ConnectionUi(
@@ -249,6 +251,7 @@ private fun AppRoot(viewModel: MainViewModel) {
                 signingOut = signingOut,
                 selectedTab = statusTabs.selected(accountSignedIn, localEnabled),
                 onSelectTab = { picked -> updateStatusTabs(statusTabs.pick(picked, accountSignedIn)) },
+                onRemoteEnabledChange = viewModel::setRemoteEnabled,
                 onConnect = connect,
                 onDisconnect = viewModel::disconnect,
                 onIdleWindowChange = viewModel::setIdleWindow,

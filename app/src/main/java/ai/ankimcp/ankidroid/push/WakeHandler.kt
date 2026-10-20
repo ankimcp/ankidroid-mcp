@@ -1,6 +1,7 @@
 package ai.ankimcp.ankidroid.push
 
 import ai.ankimcp.ankidroid.log.TunnelLog
+import ai.ankimcp.ankidroid.service.REMOTE_ACCESS_OFF_REASON
 import ai.ankimcp.ankidroid.service.SERVICE_START_BLOCKED_REASON
 import ai.ankimcp.ankidroid.tunnel.TunnelState
 import kotlinx.coroutines.CoroutineScope
@@ -21,7 +22,8 @@ interface SignInNotifier {
  * so it only does quick work: start the foreground service and the tunnel, and leave the
  * connection attempt (token refresh included) to the tunnel. If that attempt ends because the
  * session expired, the sign-in notification is posted. A user who signed out on purpose gets no
- * notification.
+ * notification. With Remote access off (D63) a wake-up (one already in flight when the token
+ * was unregistered) is ignored.
  */
 class WakeHandler(
     private val scope: CoroutineScope,
@@ -49,9 +51,11 @@ class WakeHandler(
     private val wakeRunningTunnel: () -> Boolean,
     private val notifier: SignInNotifier,
     private val log: TunnelLog,
+    /** The Remote access switch (D63). */
+    private val isRemoteEnabled: () -> Boolean = { true },
     private val watchTimeoutMs: Long = WATCH_TIMEOUT_MS,
 ) {
-    enum class Outcome { Ignored, Reconnected, Nudged, Started, NotSignedIn, SigningOut, StartBlocked }
+    enum class Outcome { Ignored, Reconnected, Nudged, Started, NotSignedIn, SigningOut, StartBlocked, RemoteOff }
 
     fun onMessage(data: Map<String, String>): Outcome {
         if (data[KEY_TYPE] != TYPE_WAKE) {
@@ -59,6 +63,10 @@ class WakeHandler(
             return Outcome.Ignored
         }
         val reason = data[KEY_REASON] ?: "unspecified"
+        if (!isRemoteEnabled()) {
+            log.info("Wake-up ($reason): Remote access is off, not connecting")
+            return Outcome.RemoteOff
+        }
         if (isSigningOut()) {
             log.info("Wake-up ($reason): signing out, not connecting")
             return Outcome.SigningOut
@@ -91,6 +99,13 @@ class WakeHandler(
         if (!startService()) {
             stopTunnel(SERVICE_START_BLOCKED_REASON)
             return Outcome.StartBlocked
+        }
+        // Remote access turned off after the check above: its stop found nothing running yet, so
+        // this run would outlive the switch.
+        if (!isRemoteEnabled()) {
+            log.info("Wake-up ($reason): Remote access turned off, disconnecting")
+            stopTunnel(REMOTE_ACCESS_OFF_REASON)
+            return Outcome.RemoteOff
         }
         // A logout that began after the check above has already stopped the tunnel, before this
         // run existed; the credentials it is about to clear would otherwise keep this run going.

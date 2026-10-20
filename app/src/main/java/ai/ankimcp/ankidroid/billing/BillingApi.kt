@@ -42,6 +42,9 @@ sealed interface BillingApiResult<out T> {
     /** 503 from a google-play call: Play billing is switched off on this environment. */
     data object BillingDisabled : BillingApiResult<Nothing>
 
+    /** 404, 405 or 501 from `/billing/status`: this relay has no billing (yet). Not an error. */
+    data object NotAvailable : BillingApiResult<Nothing>
+
     /** 400, a second 401, other 4xx, or a 200 the app cannot parse. Not retried automatically. */
     data class Rejected(val message: String) : BillingApiResult<Nothing>
 
@@ -173,6 +176,10 @@ class BillingApi(
                     log.warn("Billing $name: Google Play billing is disabled on the server (HTTP 503)")
                     return BillingApiResult.BillingDisabled
                 }
+                !playCall && code in NOT_AVAILABLE_CODES -> {
+                    log.warn("Billing status not available on this relay (HTTP $code)")
+                    return BillingApiResult.NotAvailable
+                }
                 code == 429 || code in 500..599 -> {
                     log.warn("Billing $name failed: HTTP $code")
                     return BillingApiResult.RetryLater("Server error (HTTP $code)")
@@ -219,6 +226,9 @@ class BillingApi(
         private val JSON_MEDIA_TYPE = "application/json".toMediaType()
         private val EMPTY_BODY: RequestBody = ByteArray(0).toRequestBody(null)
         private const val MAX_ERROR_TEXT = 200
+
+        /** A relay without the billing routes answers 404 or 405; 501 for "not implemented". */
+        private val NOT_AVAILABLE_CODES = setOf(404, 405, 501)
         private val HEX_64 = Regex("[0-9a-fA-F]{64}")
 
         internal fun parsePrepare(json: JsonObject): PrepareResponse? {

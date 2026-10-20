@@ -32,6 +32,9 @@ sealed interface PlanLoad {
     data class Loaded(val status: PlanStatus) : PlanLoad
 
     data object Failed : PlanLoad
+
+    /** The relay has no billing routes (404/405/501): a quiet note, not an error. */
+    data object NotAvailable : PlanLoad
 }
 
 enum class BillingError {
@@ -537,6 +540,7 @@ class BillingCoordinator(
             BillingApiResult.NotOwned -> BillingApiResult.NotOwned
             BillingApiResult.AlreadySubscribed -> BillingApiResult.AlreadySubscribed
             BillingApiResult.BillingDisabled -> BillingApiResult.BillingDisabled
+            BillingApiResult.NotAvailable -> BillingApiResult.NotAvailable
             is BillingApiResult.Rejected -> result
             is BillingApiResult.RetryLater -> result
         }
@@ -597,6 +601,7 @@ class BillingCoordinator(
         _state.update {
             when (result) {
                 is BillingApiResult.Ok -> it.copy(plan = PlanLoad.Loaded(result.value))
+                BillingApiResult.NotAvailable -> it.copy(plan = PlanLoad.NotAvailable)
                 // Keep a loaded status on a failed refresh; only a first load shows the error.
                 else -> if (it.plan is PlanLoad.Loaded) it else it.copy(plan = PlanLoad.Failed)
             }
@@ -653,7 +658,7 @@ class BillingCoordinator(
         BillingApiResult.SignedOut -> BillingError.SignedOut
         BillingApiResult.NotOwned -> BillingError.NotOwned
         BillingApiResult.AlreadySubscribed -> BillingError.AlreadySubscribed
-        BillingApiResult.BillingDisabled -> BillingError.BillingDisabled
+        BillingApiResult.BillingDisabled, BillingApiResult.NotAvailable -> BillingError.BillingDisabled
         is BillingApiResult.Rejected -> BillingError.Server
         is BillingApiResult.RetryLater -> BillingError.Network
     }

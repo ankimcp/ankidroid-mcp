@@ -114,16 +114,26 @@ internal object StatusTabMemory {
 /**
  * The dot before the tab title, as the add-on's `_derive_state` (toolbar_indicator.py): green
  * when connected, amber while a run is going on but not connected, grey otherwise. Errors are
- * grey, as there: the add-on has no error colour. For the local server, "going on" is the
- * switch on and the server starting or waiting for Wi-Fi; a public address or a failed bind is
- * an error.
+ * grey, as there: the add-on has no error colour. Remote access off (D63) is grey whatever the
+ * tunnel state still says. For the local server, "going on" is the switch on and the server
+ * starting or waiting for Wi-Fi; a public address or a failed bind is an error.
  */
-internal fun statusTabDot(tab: StatusTab, tunnelState: TunnelState, localEnabled: Boolean, localState: LocalServerState): TabDot =
+internal fun statusTabDot(
+    tab: StatusTab,
+    remoteEnabled: Boolean,
+    tunnelState: TunnelState,
+    localEnabled: Boolean,
+    localState: LocalServerState,
+): TabDot =
     when (tab) {
-        StatusTab.Remote -> when (tunnelState) {
-            is TunnelState.Connected -> TabDot.Connected
-            TunnelState.WaitingForNetwork, is TunnelState.Connecting, is TunnelState.Reconnecting -> TabDot.Connecting
-            TunnelState.Idle, is TunnelState.Stopped -> TabDot.Off
+        StatusTab.Remote -> if (!remoteEnabled) {
+            TabDot.Off
+        } else {
+            when (tunnelState) {
+                is TunnelState.Connected -> TabDot.Connected
+                TunnelState.WaitingForNetwork, is TunnelState.Connecting, is TunnelState.Reconnecting -> TabDot.Connecting
+                TunnelState.Idle, is TunnelState.Stopped -> TabDot.Off
+            }
         }
         StatusTab.Local -> if (!localEnabled) {
             TabDot.Off

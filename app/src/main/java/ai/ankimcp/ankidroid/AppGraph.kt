@@ -57,6 +57,7 @@ import ai.ankimcp.ankidroid.settings.DetailedLogging
 import ai.ankimcp.ankidroid.settings.FreezeNotice
 import ai.ankimcp.ankidroid.settings.IdleWindow
 import ai.ankimcp.ankidroid.settings.LocalServerSettings
+import ai.ankimcp.ankidroid.settings.RemoteAccessSettings
 import ai.ankimcp.ankidroid.settings.SharedPreferencesKeyValueStore
 import ai.ankimcp.ankidroid.anki.AnkiDroidSync
 import ai.ankimcp.ankidroid.service.NotificationSyncRequester
@@ -126,6 +127,9 @@ class AppGraph(context: Context) {
         SharedPreferencesKeyValueStore(appContext.getSharedPreferences(ConnectionSettings.PREFS_NAME, Context.MODE_PRIVATE))
     val settings = ConnectionSettings(settingsStore)
     val freezeNotice = FreezeNotice(settingsStore)
+
+    /** The Remote access switch (D63); read by the push coordinator, the wake handler and the UI. */
+    val remoteSettings = RemoteAccessSettings(settingsStore)
     val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     /** Read by [redactionSecrets]; the stores it reads are created further down. */
@@ -249,6 +253,7 @@ class AppGraph(context: Context) {
             ),
         ),
         isSignedIn = { credentialStore.load() != null },
+        isRemoteEnabled = remoteSettings::isEnabled,
         appVersion = config.appVersion,
         work = WorkManagerPushWorkScheduler(WorkManagerQueue(appContext)),
         log = log,
@@ -328,6 +333,7 @@ class AppGraph(context: Context) {
         tunnel = tunnel,
         push = push,
         isSignedIn = { credentialStore.load() != null },
+        isRemoteEnabled = remoteSettings::isEnabled,
         startService = { callerStartsTunnel -> TunnelForegroundService.start(appContext, callerStartsTunnel) },
         notifier = signInNotifier,
         log = log,
@@ -438,6 +444,7 @@ internal fun buildWakeHandler(
     tunnel: TunnelConnection,
     push: PushCoordinator,
     isSignedIn: () -> Boolean,
+    isRemoteEnabled: () -> Boolean,
     startService: (callerStartsTunnel: Boolean) -> Boolean,
     notifier: SignInNotifier,
     log: TunnelLog,
@@ -446,6 +453,7 @@ internal fun buildWakeHandler(
     tunnelState = tunnel.state,
     isTunnelRunning = { tunnel.isRunning },
     isSignedIn = isSignedIn,
+    isRemoteEnabled = isRemoteEnabled,
     isSigningOut = { push.isSigningOut },
     startService = { startService(true) },
     startTunnel = { tunnel.start(wokenByPush = true) },

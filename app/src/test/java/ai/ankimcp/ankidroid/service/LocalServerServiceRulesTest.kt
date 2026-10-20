@@ -50,6 +50,19 @@ class LocalServerServiceRulesTest {
     }
 
     @Test
+    fun `a start for the tunnel while Remote access is off leaves it alone`() {
+        // Connect was queued, then the switch turned off before the service ran (D63).
+        val connect = serviceStartExtras(callerStartsTunnel = false)
+        var tunnelStarts = 0
+
+        startTunnelForServiceStart(readExtra = { key, default -> connect[key] ?: default }, remoteEnabled = false) { tunnelStarts++ }
+        assertEquals(0, tunnelStarts)
+
+        startTunnelForServiceStart(readExtra = { key, default -> connect[key] ?: default }, remoteEnabled = true) { tunnelStarts++ }
+        assertEquals(1, tunnelStarts)
+    }
+
+    @Test
     fun `notification shows the local server address, and the tunnel only while it runs`() {
         assertEquals(listOf("Local MCP server on 192.168.1.20:8765"), notificationLines(TunnelState.Idle, running))
         assertEquals(listOf("Local MCP server on 192.168.1.20:8765"), notificationLines(stopped, running))

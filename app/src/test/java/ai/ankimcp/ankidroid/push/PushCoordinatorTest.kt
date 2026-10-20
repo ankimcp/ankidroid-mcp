@@ -115,6 +115,7 @@ class PushCoordinatorTest {
     private val store = PushRegistrationStore(prefs)
     private val log = TunnelLog(mirrorToLogcat = false)
     private var signedIn = true
+    private var remoteEnabled = true
 
     /** A coordinator as a (new) process would build it, over [store] (or a fresh read of the same prefs). */
     private fun newCoordinator(appVersion: String = "0.1.0", store: PushRegistrationStore = this.store) = PushCoordinator(
@@ -122,6 +123,7 @@ class PushCoordinatorTest {
         registrar = registrar,
         store = store,
         isSignedIn = { signedIn },
+        isRemoteEnabled = { remoteEnabled },
         appVersion = appVersion,
         work = work,
         log = log,
@@ -680,5 +682,328 @@ class PushCoordinatorTest {
 
         assertEquals(PendingTokenDelete("token-1", serverDelete = true, localDelete = false), PushRegistrationStore(prefs).pendingDelete)
         assertFalse("never prints the token", store.pendingDelete.toString().contains("token-1"))
+    }
+
+    // Remote access switch (D63)
+
+    @Test
+    fun `turning Remote access off removes the token from the server and keeps credentials and the FCM token`() = runBlocking {
+        coordinator.onAppStart()
+        val cancelsBefore = work.cancelled
+        var signedInAtDelete = false
+        registrar.onUnregister = {
+            signedInAtDelete = signedIn
+            PushResult.Ok
+        }
+
+        remoteEnabled = false
+        coordinator.onRemoteDisabled()
+
+        assertEquals(listOf("token-1"), registrar.unregistered)
+        assertTrue("the DELETE ran with the credentials still there", signedInAtDelete)
+        assertEquals(PushRegistrationState(), store.state.value)
+        assertNull(store.pendingDelete)
+        assertEquals("the FCM token stays", 0, messaging.deletes)
+        assertEquals("auto-init is left as it was", listOf(true), messaging.autoInit)
+        assertFalse(coordinator.wakeUpsReady)
+        assertFalse("not a sign-out", coordinator.isSigningOut)
+        assertEquals(cancelsBefore + 1, work.cancelled)
+        assertEquals(1, work.dailyCancelled)
+        assertEquals(0, work.tokenDeletesScheduled)
+    }
+
+    @Test
+    fun `while Remote access is off nothing registers, but a pending delete is still retried`() = runBlocking {
+        coordinator.onAppStart()
+        registrar.onUnregister = { PushResult.RetryLater("Network error: offline") }
+        remoteEnabled = false
+        coordinator.onRemoteDisabled()
+        assertEquals(PendingTokenDelete("token-1", serverDelete = true, localDelete = false), store.pendingDelete)
+        assertEquals("left to the delete worker", 1, work.tokenDeletesScheduled)
+        val registeredBefore = registrar.registered.size
+        val scheduledBefore = work.scheduled
+
+        coordinator.onAppStart()
+        coordinator.onNewToken("token-2")
+        coordinator.runDailyCheck()
+        assertTrue("the retry worker is done, not retried", coordinator.runScheduledRetry())
+        coordinator.onSignedIn()
+
+        assertEquals(registeredBefore, registrar.registered.size)
+        assertEquals(scheduledBefore, work.scheduled)
+        assertEquals("app start and sign-in each retried the DELETE", listOf("token-1", "token-1", "token-1"), registrar.unregistered)
+        assertEquals(PendingTokenDelete("token-1", serverDelete = true, localDelete = false), store.pendingDelete)
+        assertFalse(coordinator.wakeUpsReady)
+
+        // Online again: the delete worker finishes it.
+        registrar.onUnregister = { PushResult.Ok }
+        assertTrue(coordinator.retryPendingDelete(fromWorker = true))
+        assertNull(store.pendingDelete)
+    }
+
+    @Test
+    fun `turning Remote access on registers again like a sign-in`() = runBlocking {
+        coordinator.onAppStart()
+        remoteEnabled = false
+        coordinator.onRemoteDisabled()
+        val dailyBefore = work.dailyEnsured
+
+        remoteEnabled = true
+        coordinator.onRemoteEnabled()
+
+        assertEquals(listOf("token-1", "token-1"), registrar.registered)
+        assertEquals("token-1", store.state.value.token)
+        assertTrue(coordinator.wakeUpsReady)
+        assertEquals(dailyBefore + 1, work.dailyEnsured)
+    }
+
+    @Test
+    fun `a sign-in with Remote access off registers nothing`() = runBlocking {
+        remoteEnabled = false
+
+        coordinator.onSignedIn()
+
+        assertTrue(registrar.registered.isEmpty())
+        assertEquals(0, work.dailyEnsured)
+        assertTrue(messaging.autoInit.isEmpty())
+    }
+
+    @Test
+    fun `turning Remote access off with nothing registered sends no DELETE`() = runBlocking {
+        remoteEnabled = false
+
+        coordinator.onRemoteDisabled()
+
+        assertTrue(registrar.unregistered.isEmpty())
+        assertNull(store.pendingDelete)
+        assertEquals(0, work.tokenDeletesScheduled)
+    }
+
+    @Test
+    fun `turning Remote access off during a logout leaves the removal to the logout`() = runTest {
+        coordinator.onAppStart()
+        val deleteGate = CompletableDeferred<Unit>()
+        registrar.onUnregister = {
+            deleteGate.await()
+            PushResult.Ok
+        }
+        val logout = launch { coordinator.logout { signedIn = false } }
+        runCurrent()
+
+        remoteEnabled = false
+        val disabled = launch { coordinator.onRemoteDisabled() }
+        runCurrent()
+        deleteGate.complete(Unit)
+        logout.join()
+        disabled.join()
+
+        assertEquals("one DELETE, the logout's", listOf("token-1"), registrar.unregistered)
+        assertNull(store.pendingDelete)
+    }
+
+    @Test
+    fun `an off that runs after the user's final on removes nothing`() = runBlocking {
+        coordinator.onAppStart()
+        val dailyCancelledBefore = work.dailyCancelled
+
+        // Off then on tapped; the coroutines run in reverse: the setting already says on.
+        remoteEnabled = true
+        coordinator.onRemoteEnabled()
+        coordinator.onRemoteDisabled()
+
+        assertTrue(registrar.unregistered.isEmpty())
+        assertEquals("token-1", store.state.value.token)
+        assertTrue(coordinator.wakeUpsReady)
+        assertEquals(dailyCancelledBefore, work.dailyCancelled)
+        assertNull(store.pendingDelete)
+    }
+
+    @Test
+    fun `on then off tapped, run as off then on, ends unregistered`() = runBlocking {
+        coordinator.onAppStart()
+
+        remoteEnabled = false
+        coordinator.onRemoteDisabled()
+        coordinator.onRemoteEnabled()
+
+        assertEquals(listOf("token-1"), registrar.unregistered)
+        assertEquals("the on registered nothing with the switch off", listOf("token-1"), registrar.registered)
+        assertEquals(PushRegistrationState(), store.state.value)
+        assertFalse(coordinator.wakeUpsReady)
+    }
+
+    @Test
+    fun `off, on, off removes, registers and removes again`() = runBlocking {
+        coordinator.onAppStart()
+
+        remoteEnabled = false
+        coordinator.onRemoteDisabled()
+        remoteEnabled = true
+        coordinator.onRemoteEnabled()
+        remoteEnabled = false
+        coordinator.onRemoteDisabled()
+
+        assertEquals(listOf("token-1", "token-1"), registrar.unregistered)
+        assertEquals(listOf("token-1", "token-1"), registrar.registered)
+        assertNull(store.pendingDelete)
+        assertEquals(PushRegistrationState(), store.state.value)
+    }
+
+    @Test
+    fun `app start with the switch off and a token still registered removes it`() = runBlocking {
+        coordinator.onAppStart()
+        // The process died after the setting was written and before the DELETE: a new process.
+        remoteEnabled = false
+        val restarted = newCoordinator(store = PushRegistrationStore(prefs))
+
+        restarted.onAppStart()
+
+        assertEquals(listOf("token-1"), registrar.unregistered)
+        assertEquals(listOf("token-1"), registrar.registered)
+        assertEquals(PushRegistrationState(), PushRegistrationStore(prefs).state.value)
+        assertNull(PushRegistrationStore(prefs).pendingDelete)
+        assertFalse(restarted.wakeUpsReady)
+
+        // Idempotent: the next start finds nothing to remove.
+        newCoordinator(store = PushRegistrationStore(prefs)).onAppStart()
+        assertEquals(listOf("token-1"), registrar.unregistered)
+    }
+
+    @Test
+    fun `app start with the switch off and a registration still retrying removes the current FCM token`() = runBlocking {
+        // A PUT may have landed before the process died without recording it.
+        store.saveFailure(PushRegistrationState.LastResult.Retrying, "Network error", clock.millis())
+        remoteEnabled = false
+
+        coordinator.onAppStart()
+
+        assertEquals(listOf("token-1"), registrar.unregistered)
+        assertEquals(PushRegistrationState(), store.state.value)
+        assertNull(store.pendingDelete)
+    }
+
+    @Test
+    fun `app start with the switch off and nothing registered sends no DELETE`() = runBlocking {
+        remoteEnabled = false
+
+        coordinator.onAppStart()
+
+        assertTrue(registrar.unregistered.isEmpty())
+        assertTrue(registrar.registered.isEmpty())
+    }
+
+    @Test
+    fun `a DELETE answered signed out stays owed until the next sign-in with the switch off`() = runBlocking {
+        coordinator.onAppStart()
+        // The refresh token died: credentials are gone by the time the DELETE answers.
+        registrar.onUnregister = { if (signedIn) PushResult.Ok else PushResult.SignedOut }
+        signedIn = false
+
+        remoteEnabled = false
+        coordinator.onRemoteDisabled()
+
+        val owed = PendingTokenDelete("token-1", serverDelete = true, localDelete = false)
+        assertEquals(owed, store.pendingDelete)
+        assertEquals("no worker: only credentials can send it", 0, work.tokenDeletesScheduled)
+        assertEquals(PushRegistrationState(), store.state.value)
+
+        // Neither the worker nor an app start while signed out drops it.
+        assertTrue(coordinator.retryPendingDelete(fromWorker = true))
+        coordinator.onAppStart()
+        assertEquals(owed, store.pendingDelete)
+        assertEquals(listOf("token-1"), registrar.unregistered)
+
+        signedIn = true
+        coordinator.onSignedIn()
+
+        assertEquals(listOf("token-1", "token-1"), registrar.unregistered)
+        assertNull(store.pendingDelete)
+        assertEquals("the switch is still off", listOf("token-1"), registrar.registered)
+        assertEquals(PushRegistrationState(), store.state.value)
+    }
+
+    @Test
+    fun `on while the off's DELETE is in flight waits for it and registers after`() = runTest {
+        coordinator.onAppStart()
+        val deleteGate = CompletableDeferred<Unit>()
+        val events = mutableListOf<String>()
+        registrar.onUnregister = {
+            deleteGate.await()
+            events += "DELETE"
+            PushResult.Ok
+        }
+        registrar.onRegister = { events += "PUT" }
+        remoteEnabled = false
+        val off = launch { coordinator.onRemoteDisabled() }
+        runCurrent()
+
+        remoteEnabled = true
+        val on = launch { coordinator.onRemoteEnabled() }
+        runCurrent()
+        assertEquals("the on waits for the lock", emptyList<String>(), events)
+        deleteGate.complete(Unit)
+        off.join()
+        on.join()
+
+        assertEquals(listOf("DELETE", "PUT"), events)
+        assertEquals("token-1", store.state.value.token)
+        assertNull(store.pendingDelete)
+        assertTrue(coordinator.wakeUpsReady)
+    }
+
+    @Test
+    fun `on with a DELETE still owed sends it before the PUT`() = runBlocking {
+        coordinator.onAppStart()
+        registrar.onUnregister = { PushResult.RetryLater("Network error: offline") }
+        remoteEnabled = false
+        coordinator.onRemoteDisabled()
+        val events = mutableListOf<String>()
+        registrar.onUnregister = {
+            events += "DELETE"
+            PushResult.Ok
+        }
+        registrar.onRegister = { events += "PUT" }
+
+        remoteEnabled = true
+        coordinator.onRemoteEnabled()
+
+        assertEquals(listOf("DELETE", "PUT"), events)
+        assertEquals(listOf("token-1", "token-1"), registrar.unregistered)
+        assertNull(store.pendingDelete)
+        assertEquals("token-1", store.state.value.token)
+    }
+
+    @Test
+    fun `on with a DELETE still owed that fails again registers nothing and schedules a retry`() = runBlocking {
+        coordinator.onAppStart()
+        registrar.onUnregister = { PushResult.RetryLater("Network error: offline") }
+        remoteEnabled = false
+        coordinator.onRemoteDisabled()
+        val registeredBefore = registrar.registered.size
+
+        remoteEnabled = true
+        coordinator.onRemoteEnabled()
+
+        assertEquals(registeredBefore, registrar.registered.size)
+        assertEquals(1, work.scheduled)
+        assertEquals(PushRegistrationState.LastResult.Retrying, store.state.value.lastResult)
+        assertEquals(PendingTokenDelete("token-1", serverDelete = true, localDelete = false), store.pendingDelete)
+    }
+
+    @Test
+    fun `logout takes over a DELETE that Remote-off left owed`() = runBlocking {
+        coordinator.onAppStart()
+        registrar.onUnregister = { PushResult.RetryLater("Network error: offline") }
+        remoteEnabled = false
+        coordinator.onRemoteDisabled()
+        assertEquals(1, work.tokenDeletesScheduled)
+        registrar.onUnregister = { PushResult.Ok }
+
+        coordinator.logout { signedIn = false }
+
+        assertEquals("the owed token, not a fresh fetch", listOf("token-1", "token-1"), registrar.unregistered)
+        assertNull(store.pendingDelete)
+        assertEquals(1, messaging.deletes)
+        assertEquals(PushRegistrationState(), store.state.value)
     }
 }

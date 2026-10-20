@@ -36,6 +36,9 @@ enum class PlanKind {
     Loading,
     LoadFailed,
 
+    /** The relay has no billing yet (status 404/405/501): the quiet "not available yet" note only. */
+    NotAvailable,
+
     /** tier free, provider none: both products can be bought. */
     Free,
 
@@ -89,6 +92,7 @@ internal fun planCardUi(state: BillingState, userTier: String): PlanCardUi {
     val status = (state.plan as? PlanLoad.Loaded)?.status
     val kind = when {
         state.plan is PlanLoad.Loading -> PlanKind.Loading
+        state.plan is PlanLoad.NotAvailable -> PlanKind.NotAvailable
         status == null -> PlanKind.LoadFailed
         status.provider == PlanProvider.None -> PlanKind.Free
         status.provider == PlanProvider.GooglePlay -> PlanKind.GooglePlay
@@ -185,6 +189,7 @@ internal fun PlanCard(
             }
             when (ui.kind) {
                 PlanKind.Loading -> SupportingText(stringResource(R.string.plan_loading))
+                PlanKind.NotAvailable -> SupportingText(stringResource(R.string.plan_products_empty))
                 PlanKind.LoadFailed -> {
                     Text(stringResource(R.string.plan_load_failed), color = MaterialTheme.colorScheme.error)
                     OutlinedButton(onClick = onRetry) { Text(stringResource(R.string.plan_try_again)) }

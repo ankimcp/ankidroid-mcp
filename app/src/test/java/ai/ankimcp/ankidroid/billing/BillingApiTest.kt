@@ -265,6 +265,25 @@ class BillingApiTest {
     }
 
     @Test
+    fun `status 404 405 and 501 mean billing is not available on this relay`() {
+        for (code in listOf(404, 405, 501)) {
+            server.enqueue(json(code, """{"message":"Not Found"}"""))
+            assertEquals(BillingApiResult.NotAvailable, runBlocking { api().status() })
+        }
+        val warnings = log.entries.value.filter { it.level == ai.ankimcp.ankidroid.log.LogEntry.Level.WARN }.map { it.message }
+        assertEquals(
+            listOf(404, 405, 501).map { "Billing status not available on this relay (HTTP $it)" },
+            warnings,
+        )
+    }
+
+    @Test
+    fun `404 from a google-play call stays an error`() {
+        server.enqueue(json(404, "{}"))
+        assertTrue(runBlocking { api().prepare() } is BillingApiResult.Rejected)
+    }
+
+    @Test
     fun `status 500 is retry later and 503 is not billing disabled`() {
         server.enqueue(json(500, "{}"))
         server.enqueue(json(503, "{}"))

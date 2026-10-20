@@ -152,7 +152,7 @@ class AppGraphWiringTest {
         /** `onStartCommand` arrives after the FCM callback has returned. */
         fun deliverStartCommand() {
             val extras = checkNotNull(pendingIntent) { "the service was never started" }
-            startTunnelForServiceStart({ key, default -> extras[key] ?: default }, tunnel::start)
+            startTunnelForServiceStart({ key, default -> extras[key] ?: default }) { tunnel.start() }
         }
     }
 
@@ -162,6 +162,7 @@ class AppGraphWiringTest {
             tunnel = tunnel,
             push = push,
             isSignedIn = signedIn,
+            isRemoteEnabled = { true },
             startService = service::start,
             notifier = notifier,
             log = log,

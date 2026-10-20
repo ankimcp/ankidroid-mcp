@@ -3,14 +3,10 @@ package ai.ankimcp.ankidroid.ui
 import ai.ankimcp.ankidroid.R
 import ai.ankimcp.ankidroid.local.ClientConfig
 import ai.ankimcp.ankidroid.local.LocalServerState
-import ai.ankimcp.ankidroid.service.FreezingOem
 import ai.ankimcp.ankidroid.settings.LocalServerSettings
-import android.annotation.SuppressLint
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
-import android.provider.Settings
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -25,7 +21,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.FilledTonalButton
@@ -225,34 +220,6 @@ private fun PortField(port: Int, onPortChange: (Int) -> Boolean, onMessage: (Str
     }
 }
 
-/**
- * The battery card while the local server is on, with the direct exemption request: without a
- * push wake-up nothing can bring a dozing phone's server back (D56). The tunnel never shows it
- * (D42). It replaces the D42 card then, so it also carries the maker's own switches on
- * freezing OEMs.
- */
-@Composable
-internal fun LocalBatteryCard(unrestricted: Boolean, oem: FreezingOem?, freezeDetected: Boolean, modifier: Modifier = Modifier) {
-    val context = LocalContext.current
-    Card(modifier.fillMaxWidth()) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Battery", style = MaterialTheme.typography.titleMedium)
-            if (unrestricted) {
-                Text("✓ Battery optimisation is off for AnkiMCP.")
-                if (freezeDetected) SupportingText(STILL_PAUSED_TEXT)
-            } else {
-                Text(
-                    "No cloud service can wake the phone while the local server is on. Without this setting " +
-                        "the server stops answering about 30 s after the screen turns off on some phones. Let " +
-                        "AnkiMCP run without battery optimisation.",
-                )
-                Button(onClick = { requestIgnoreBatteryOptimizations(context) }) { Text("Allow") }
-            }
-            if (oem != null) SupportingText(oem.instructions)
-        }
-    }
-}
-
 @Composable
 private fun Field(value: String, label: String? = null) {
     label?.let { Text(it, style = MaterialTheme.typography.labelLarge) }
@@ -296,18 +263,6 @@ private fun shareText(context: Context, text: String) {
         context.startActivity(Intent.createChooser(send, "Share URL and token"))
     } catch (_: ActivityNotFoundException) {
         // A chooser always resolves; nothing to do on the odd device where it does not.
-    }
-}
-
-// Play allows the direct request when the core function cannot use FCM; this mode cannot (D56).
-@SuppressLint("BatteryLife")
-private fun requestIgnoreBatteryOptimizations(context: Context) {
-    try {
-        context.startActivity(
-            Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:${context.packageName}")),
-        )
-    } catch (_: ActivityNotFoundException) {
-        openBatterySettings(context)
     }
 }
 

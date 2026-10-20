@@ -42,7 +42,7 @@ What you need
 - Optional: Plus or Pro, monthly subscriptions sold through Google Play in the app.
 
 No account? Use it on your Wi-Fi
-The app can also work entirely on your Wi-Fi, for free and without an account: it serves MCP directly to Claude Desktop or Claude Code on a computer on the same network. Turn on "Local server (Wi-Fi)" on the Local tab and share the address the app shows to the computer. It is open to anyone on that Wi-Fi unless you turn on "Require access token", and uses plain HTTP without encryption, so use it on a network you trust. Claude on the web can't reach your phone this way. While it is on, the app shows a notification and asks to be exempted from battery optimisation, because nothing can wake the phone in this mode.
+The app can also work entirely on your Wi-Fi, for free and without an account: it serves MCP directly to Claude Desktop or Claude Code on a computer on the same network. Turn on "Local server (Wi-Fi)" on the Local tab and share the address the app shows to the computer. It is open to anyone on that Wi-Fi unless you turn on "Require access token", and uses plain HTTP without encryption, so use it on a network you trust. Claude on the web can't reach your phone this way. While it is on, the app shows a notification; turn battery optimisation off for the app (the Battery card links to the setting), because nothing can wake the phone in this mode.
 
 How it connects
 When Claude needs your decks and the phone is not connected, AnkiMCP sends a push message and the app connects. It disconnects again when the screen turns off, or after 15, 30 or 60 minutes without requests (you choose). Claude's next request wakes the phone again. Nothing runs in the background between requests.
