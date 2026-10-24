@@ -1819,9 +1819,19 @@ computer on the same Wi-Fi; claude.ai cannot reach a LAN address. Code in `local
     `/prepare`, cached per account) and then goes to `POST /billing/google-play/purchase` with
     only `{"purchaseToken"}`; PENDING shows "Payment pending" and sends nothing (the server
     would apply nothing); USER_CANCELED goes back to idle; ITEM_ALREADY_OWNED runs a restore.
-    OK with a null or empty purchase list (a `DEFERRED` downgrade can report only a status)
-    runs an interactive restore, which finds the new purchase in `queryPurchasesAsync` and
-    registers it, or goes back to idle; the card never stays on "Opening Google Play".
+    A `DEFERRED` downgrade returns OK with a new PURCHASED token that still lists the old
+    product until the renewal. Play's subscriptions guide ("Handle deferred replacement") says
+    this for `queryPurchasesAsync`: the new token "remains associated with the old product
+    until the deferred replacement takes place". That the listener delivers the same shape was
+    inferred on 2026-10-24 from a phone (the card stayed on "Opening Google Play" with no
+    register line) and the server (a new token whose line item was still Pro); the app does
+    not log the listener's purchases. A purchase that arrives while Play's sheet is up waits
+    for the sheet unless it is the sheet's result, and for a plan change the old product
+    counts as part of that result, so the downgrade's token is registered like any other
+    (before this it waited for itself). OK with a null or empty
+    purchase list runs an interactive restore, which finds a new purchase in
+    `queryPurchasesAsync` and registers it, or goes back to idle; the card never stays on
+    "Opening Google Play".
   - State machine (`PurchaseFlow`): Idle, Preparing, Launching, Pending, Registering, Done,
     Failed. Errors map to: SignedOut, ManagedElsewhere (blocked), NotOwned (403, or a purchase
     of another AnkiMCP account or without an obfuscated id, i.e. bought outside the app),

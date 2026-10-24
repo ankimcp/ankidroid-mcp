@@ -21,6 +21,9 @@ updates:
         update-types: ['version-update:semver-minor', 'version-update:semver-major']
       - dependency-name: 'org.jetbrains.kotlin:*'
         update-types: ['version-update:semver-minor', 'version-update:semver-major']
+      # Built with Kotlin 2.4 (kotlin-stdlib 2.4.10); the 2.2 compiler reads metadata only up to 2.3.
+      - dependency-name: 'org.jetbrains.kotlinx:kotlinx-serialization-*'
+        versions: ['>=1.12.0']
       - dependency-name: com.android.application
         update-types: ['version-update:semver-major']
       - dependency-name: gradle-wrapper

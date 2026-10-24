@@ -148,6 +148,12 @@ class BillingCoordinator(
     /** Bumped at every account change so late results of the old account are dropped. */
     @Volatile private var generation = 0
 
+    /**
+     * Products whose purchase is the open sheet's result: the one bought and, for a plan change,
+     * the replaced one (a DEFERRED change's new token stays on the old product until renewal).
+     */
+    @Volatile private var launchProducts: Set<String> = emptySet()
+
     /** Bumped by every restore, so a cancelled one's cleanup never touches a newer one's flow. */
     @Volatile private var restoreRun = 0
 
@@ -285,6 +291,7 @@ class BillingCoordinator(
             log.warn("Billing: the screen closed before Google Play could open")
             return fail(BillingError.NoScreen)
         }
+        launchProducts = setOfNotNull(productId, replace?.oldProductId)
         setFlow(PurchaseFlow.Launching(productId))
         log.info(
             "Billing: opening Google Play for $productId" +
@@ -329,8 +336,8 @@ class BillingCoordinator(
                 val ours = update.purchases.filter { purchase -> purchase.productIds.any { it in BillingProducts.ALL } }
                 val actionable = ours.filter { it.state != PlayPurchase.State.Unspecified }
                 if (actionable.isEmpty()) {
-                    // OK without a purchase (a deferred downgrade reports only a status): Play's
-                    // own list says what happened; never leave the card on "Opening Google Play".
+                    // OK without a purchase in the result: Play's own list says what happened;
+                    // never leave the card on "Opening Google Play".
                     if (_state.value.flow is PurchaseFlow.Launching) {
                         log.info("Billing: Google Play finished without a purchase in the result; checking purchases")
                         track { restore(interactive = true) }
@@ -378,7 +385,7 @@ class BillingCoordinator(
         if (isSkipped(purchase.purchaseToken)) return fail(BillingError.NotOwned)
         _state.first { state ->
             val flow = state.flow
-            !(flow is PurchaseFlow.Preparing || (flow is PurchaseFlow.Launching && flow.productId != productId))
+            !(flow is PurchaseFlow.Preparing || (flow is PurchaseFlow.Launching && productId !in launchProducts))
         }
         setFlow(PurchaseFlow.Registering(productId))
         val accountId = when (val result = accountId()) {

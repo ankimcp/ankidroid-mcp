@@ -548,7 +548,48 @@ class BillingCoordinatorTest {
     // Review fixes (D62).
 
     @Test
-    fun `OK without purchases (deferred downgrade) leaves launching through a restore`() = runTest {
+    fun `OK without a purchase in the result leaves launching through a restore`() = runTest {
+        val h = harness()
+        h.loaded()
+        advanceUntilIdle()
+        h.coordinator.subscribe(BillingProducts.PLUS) { host }
+        advanceUntilIdle()
+        assertEquals(PurchaseFlow.Launching(BillingProducts.PLUS), h.coordinator.state.value.flow)
+
+        // Play lists a new purchase that the listener's result did not carry.
+        h.gateway.purchasesResult = GatewayResult.Ok(listOf(purchase("new-tok")))
+        h.gateway.updatesFlow.emit(PurchaseUpdate.Purchases(emptyList()))
+        advanceUntilIdle()
+        assertEquals(listOf("new-tok"), h.backend.sentTokens)
+        assertEquals(PurchaseFlow.Done("plus"), h.coordinator.state.value.flow)
+    }
+
+    @Test
+    fun `deferred downgrade result - a new token still on the old product - is registered`() = runTest {
+        val h = harness()
+        h.loaded()
+        advanceUntilIdle()
+        h.backend.prepareResult = BillingApiResult.Ok(PrepareResponse(accountId, PrepareMode.Replace, BillingProducts.PRO))
+        h.gateway.purchasesResult = GatewayResult.Ok(listOf(purchase("old", product = BillingProducts.PRO, acknowledged = true)))
+        RegisteredPurchases(h.store).add("old")
+        h.backend.defaultRegister = BillingApiResult.Ok("pro")
+        h.coordinator.subscribe(BillingProducts.PLUS) { host }
+        advanceUntilIdle()
+        assertEquals(ReplacementMode.Deferred, h.gateway.launches.single().replace?.mode)
+        assertEquals(PurchaseFlow.Launching(BillingProducts.PLUS), h.coordinator.state.value.flow)
+
+        // Play's docs: the new token "remains associated with the old product" until renewal.
+        h.gateway.updatesFlow.emit(
+            PurchaseUpdate.Purchases(listOf(purchase("deferred-new", product = BillingProducts.PRO))),
+        )
+        advanceUntilIdle()
+        assertEquals(listOf("deferred-new"), h.backend.sentTokens)
+        assertEquals(PurchaseFlow.Done("pro"), h.coordinator.state.value.flow)
+        assertTrue(RegisteredPurchases(h.store).contains("deferred-new"))
+    }
+
+    /** Pro to Plus with Play's sheet up: Launching(plus), replacing the registered Pro token "old". */
+    private fun TestScope.launchedDowngrade(): Harness {
         val h = harness()
         h.loaded()
         advanceUntilIdle()
@@ -558,15 +599,69 @@ class BillingCoordinatorTest {
         h.coordinator.subscribe(BillingProducts.PLUS) { host }
         advanceUntilIdle()
         assertEquals(PurchaseFlow.Launching(BillingProducts.PLUS), h.coordinator.state.value.flow)
+        return h
+    }
 
-        // Play lists the new (deferred) purchase, but the listener got only a status.
-        h.gateway.purchasesResult = GatewayResult.Ok(
-            listOf(purchase("old", product = BillingProducts.PRO, acknowledged = true), purchase("deferred-new")),
+    @Test
+    fun `deferred downgrade token of another AnkiMCP account is not sent and ends not owned`() = runTest {
+        val h = launchedDowngrade()
+        h.gateway.updatesFlow.emit(
+            PurchaseUpdate.Purchases(listOf(purchase("deferred-new", product = BillingProducts.PRO, account = "ef".repeat(32)))),
         )
-        h.gateway.updatesFlow.emit(PurchaseUpdate.Purchases(emptyList()))
         advanceUntilIdle()
-        assertEquals(listOf("deferred-new"), h.backend.sentTokens)
-        assertEquals(PurchaseFlow.Done("plus"), h.coordinator.state.value.flow)
+        assertTrue(h.backend.sentTokens.isEmpty())
+        assertEquals(PurchaseFlow.Failed(BillingError.NotOwned), h.coordinator.state.value.flow)
+    }
+
+    @Test
+    fun `deferred downgrade token without an obfuscated id is not sent and ends not owned`() = runTest {
+        val h = launchedDowngrade()
+        h.gateway.updatesFlow.emit(
+            PurchaseUpdate.Purchases(listOf(purchase("deferred-new", product = BillingProducts.PRO, account = null))),
+        )
+        advanceUntilIdle()
+        assertTrue(h.backend.sentTokens.isEmpty())
+        assertEquals(PurchaseFlow.Failed(BillingError.NotOwned), h.coordinator.state.value.flow)
+    }
+
+    @Test
+    fun `a new purchase's sheet does not take another product's purchase as its result`() = runTest {
+        val h = harness()
+        h.loaded()
+        advanceUntilIdle()
+        h.coordinator.subscribe(BillingProducts.PLUS) { host }
+        advanceUntilIdle()
+        assertNull(h.gateway.launches.single().replace)
+        h.backend.defaultRegister = BillingApiResult.Ok("pro")
+
+        h.gateway.updatesFlow.emit(PurchaseUpdate.Purchases(listOf(purchase("tok-pro", product = BillingProducts.PRO))))
+        advanceUntilIdle()
+        assertEquals(PurchaseFlow.Launching(BillingProducts.PLUS), h.coordinator.state.value.flow)
+        assertTrue(h.backend.sentTokens.isEmpty())
+
+        h.gateway.updatesFlow.emit(PurchaseUpdate.Canceled)
+        advanceUntilIdle()
+        assertEquals(listOf("tok-pro"), h.backend.sentTokens)
+        assertEquals(PurchaseFlow.Done("pro"), h.coordinator.state.value.flow)
+    }
+
+    @Test
+    fun `prorated upgrade result from the listener is registered and ends done`() = runTest {
+        val h = harness()
+        h.loaded()
+        advanceUntilIdle()
+        h.backend.prepareResult = BillingApiResult.Ok(PrepareResponse(accountId, PrepareMode.Replace, BillingProducts.PLUS))
+        h.gateway.purchasesResult = GatewayResult.Ok(listOf(purchase("old", acknowledged = true)))
+        RegisteredPurchases(h.store).add("old")
+        h.backend.defaultRegister = BillingApiResult.Ok("pro")
+        h.coordinator.subscribe(BillingProducts.PRO) { host }
+        advanceUntilIdle()
+        assertEquals(PurchaseFlow.Launching(BillingProducts.PRO), h.coordinator.state.value.flow)
+
+        h.gateway.updatesFlow.emit(PurchaseUpdate.Purchases(listOf(purchase("upgrade-new", product = BillingProducts.PRO))))
+        advanceUntilIdle()
+        assertEquals(listOf("upgrade-new"), h.backend.sentTokens)
+        assertEquals(PurchaseFlow.Done("pro"), h.coordinator.state.value.flow)
     }
 
     @Test
