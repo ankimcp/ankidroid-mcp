@@ -1,5 +1,18 @@
 # AnkiMCP
 
+> [!IMPORTANT]
+> 📱 **TESTERS WANTED: AnkiMCP for AnkiDroid**
+>
+> A free Android app that runs an MCP server for AnkiDroid: https://ankimcp.ai/docs/ankidroid-mcp/
+>
+> It lets AI assistants that support MCP, such as Claude, work with your AnkiDroid decks: create
+> cards, review, search, and so on, over your local Wi-Fi.
+>
+> Requirements: Android 8.0+ and AnkiDroid 2.24+. Testing runs through Google Play's closed
+> testing.
+>
+> **[Sign up to test](https://docs.google.com/forms/d/e/1FAIpQLSfif8EwvBu4R-CNPC66bK9z7fA89sdBBa4td_n0n3iQrFMoNg/viewform)**
+
 AnkiMCP for AnkiDroid lets Claude work with the AnkiDroid collection on your Android phone. The app
 runs on the phone, reads AnkiDroid through AnkiDroid's official API (its ContentProvider), and
 answers Claude's MCP requests that reach it through the AnkiMCP tunnel. The phone opens an
