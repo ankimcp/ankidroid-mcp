@@ -179,7 +179,7 @@ class AppGraph(context: Context) {
         .build()
 
     val credentialStore: CredentialStore = KeystoreCredentialStore(appContext)
-    val deviceFlowClient = DeviceFlowClient(config.tunnelUrl, authHttp)
+    val deviceFlowClient = DeviceFlowClient(config.tunnelUrl, authHttp, elapsedClock = AndroidElapsedClock)
     val tokenRefresher = TokenRefresher(credentialStore, deviceFlowClient)
 
     private val billingApi = BillingApi(config.tunnelUrl, authHttp, credentialStore, tokenRefresher, log)

@@ -1,5 +1,6 @@
 package ai.ankimcp.ankidroid.auth
 
+import ai.ankimcp.ankidroid.tunnel.ElapsedClock
 import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
@@ -17,13 +18,14 @@ import java.time.Clock
 import java.time.Instant
 import java.time.ZoneOffset
 import kotlin.time.Duration
+import kotlin.time.Duration.Companion.hours
 import kotlin.time.Duration.Companion.seconds
-import kotlin.time.TestTimeSource
 
 class DeviceFlowClientTest {
     private lateinit var server: MockWebServer
     private val sleeps = mutableListOf<Duration>()
-    private val timeSource = TestTimeSource()
+    private var elapsedMs = 0L
+    private var extraSleep = Duration.ZERO
     private val now = Instant.parse("2026-01-01T00:00:00Z")
 
     @Before
@@ -41,10 +43,10 @@ class DeviceFlowClientTest {
         tunnelWsUrl = server.url("/").toString().replaceFirst("http://", "ws://").trimEnd('/'),
         http = OkHttpClient(),
         clock = Clock.fixed(now, ZoneOffset.UTC),
-        timeSource = timeSource,
+        elapsedClock = ElapsedClock { elapsedMs },
         sleep = {
             sleeps += it
-            timeSource += it
+            elapsedMs += (it + extraSleep).inWholeMilliseconds
         },
     )
 
@@ -246,6 +248,19 @@ class DeviceFlowClientTest {
 
         assertEquals("expired_token", error.errorCode)
         assertEquals(2, server.requestCount)
+    }
+
+    @Test
+    fun `a sleep that ends past the deadline fails with expired_token without polling`() {
+        server.enqueue(json(400, """{"error":"invalid_grant","error_description":"Device code not valid"}"""))
+        extraSleep = 1.hours
+
+        val error = assertThrows(AuthException::class.java) {
+            runBlocking { client().pollForToken("dc", intervalSeconds = 5, expiresInSeconds = 600) }
+        }
+
+        assertEquals("expired_token", error.errorCode)
+        assertEquals(0, server.requestCount)
     }
 
     @Test

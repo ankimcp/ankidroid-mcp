@@ -437,7 +437,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun describeAuthError(e: AuthException): String = when (e.errorCode) {
-        "expired_token" -> "The sign-in code expired. Please try again."
+        // Keycloak answers invalid_grant once an expired device code has been dropped.
+        "expired_token", "invalid_grant", "invalid_oauth2_device_code" -> "The sign-in code expired. Please try again."
         "access_denied" -> "Sign-in was declined."
         else -> "Sign-in failed: ${e.message}"
     }

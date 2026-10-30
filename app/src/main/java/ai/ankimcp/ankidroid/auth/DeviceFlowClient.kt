@@ -1,6 +1,7 @@
 package ai.ankimcp.ankidroid.auth
 
 import ai.ankimcp.ankidroid.config.AppConfig
+import ai.ankimcp.ankidroid.tunnel.ElapsedClock
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -26,8 +27,8 @@ import java.time.format.DateTimeParseException
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlin.time.Duration
+import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
-import kotlin.time.TimeSource
 
 /**
  * Raised when an auth call fails. [errorCode] is the OAuth `error` value from the server
@@ -62,7 +63,7 @@ class DeviceFlowClient(
     private val http: OkHttpClient,
     private val clientId: String = AppConfig.OAUTH_CLIENT_ID,
     private val clock: Clock = Clock.systemUTC(),
-    private val timeSource: TimeSource = TimeSource.Monotonic,
+    private val elapsedClock: ElapsedClock = ElapsedClock.Monotonic,
     private val sleep: suspend (Duration) -> Unit = { delay(it) },
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) {
@@ -105,16 +106,20 @@ class DeviceFlowClient(
      *
      * No sleep runs past the device-code deadline: if the next wait (interval or `Retry-After`)
      * would end after it, this fails with `expired_token` right away instead of sleeping first.
+     * The deadline runs on [elapsedClock] (`elapsedRealtime` on Android) and is checked again
+     * after each sleep: `delay` stops while the phone is in deep sleep, so a wait can end long
+     * after the code expired, and polling then would only get the server's "device code not valid".
      */
     suspend fun pollForToken(deviceCode: String, intervalSeconds: Long, expiresInSeconds: Long): Credentials {
         var interval = intervalSeconds
         var retryAfter = 0L
-        val deadline = timeSource.markNow() + expiresInSeconds.seconds
+        val deadlineMs = elapsedClock.elapsedMs() + expiresInSeconds * 1000
         while (true) {
             val wait = maxOf(interval, retryAfter).seconds
-            val remaining = -deadline.elapsedNow()
+            val remaining = (deadlineMs - elapsedClock.elapsedMs()).milliseconds
             if (!remaining.isPositive() || wait > remaining) break
             sleep(wait)
+            if (elapsedClock.elapsedMs() > deadlineMs) break
             retryAfter = 0L
             val data = try {
                 post(
