@@ -13,6 +13,9 @@ activityCompose = "1.13.0"
 lifecycle = "2.10.0"
 composeBom = "2026.06.01"
 browser = "1.10.0"
+# Not used directly: play-services-base (via Play Billing and Firebase Messaging) asks for fragment 1.1.0,
+# which Play Console flags as outdated. 1.9.1 needs compileSdk 34 and AGP 8.1.1 (D3).
+fragment = "1.9.1"
 work = "2.12.0"
 firebaseBom = "35.0.1"
 googleServices = "4.5.0"
@@ -28,6 +31,7 @@ androidx-activity-compose = { module = "androidx.activity:activity-compose", ver
 androidx-lifecycle-runtime-compose = { module = "androidx.lifecycle:lifecycle-runtime-compose", version.ref = "lifecycle" }
 androidx-lifecycle-viewmodel-compose = { module = "androidx.lifecycle:lifecycle-viewmodel-compose", version.ref = "lifecycle" }
 androidx-browser = { module = "androidx.browser:browser", version.ref = "browser" }
+androidx-fragment = { module = "androidx.fragment:fragment", version.ref = "fragment" }
 androidx-work-runtime-ktx = { module = "androidx.work:work-runtime-ktx", version.ref = "work" }
 compose-bom = { module = "androidx.compose:compose-bom", version.ref = "composeBom" }
 compose-ui = { module = "androidx.compose.ui:ui" }
