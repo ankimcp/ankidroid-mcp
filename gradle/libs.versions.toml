@@ -17,7 +17,7 @@ browser = "1.10.0"
 # which Play Console flags as outdated. 1.9.1 needs compileSdk 34 and AGP 8.1.1 (D3).
 fragment = "1.9.1"
 work = "2.12.0"
-firebaseBom = "35.0.1"
+firebaseBom = "35.1.0"
 googleServices = "4.5.0"
 # Local Wi-Fi MCP server (docs/DECISIONS.md D53). Last release; see the decision for why.
 nanohttpd = "2.3.1"
