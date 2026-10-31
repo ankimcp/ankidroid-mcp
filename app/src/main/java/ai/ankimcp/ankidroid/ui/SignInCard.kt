@@ -70,6 +70,11 @@ internal fun SignInCard(
                         "Open the sign-in page and confirm that it shows this code. " +
                             "The app continues automatically once you approve.",
                     )
+                    Text(
+                        "Signed up with Google or GitHub? Tap that button on the sign-in page; " +
+                            "don't type your email into the password form.",
+                        fontWeight = FontWeight.Bold,
+                    )
                     SelectionContainer { SupportingText(state.verificationUri) }
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Button(onClick = {
