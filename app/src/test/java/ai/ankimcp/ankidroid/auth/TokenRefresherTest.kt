@@ -133,6 +133,18 @@ class TokenRefresherTest {
     }
 
     @Test
+    fun `refresh without an id_token keeps the stored one`() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(200).setBody(tokenBody(1)))
+        val withIdToken = old.copy(idToken = "idt-0")
+        val store = InMemoryStore(withIdToken)
+
+        val outcome = refresher(store).refresh(withIdToken)
+
+        assertEquals("idt-0", (outcome as RefreshOutcome.Refreshed).credentials.idToken)
+        assertEquals("idt-0", store.load()?.idToken)
+    }
+
+    @Test
     fun `transient failure keeps the stored credentials`() = runBlocking {
         server.enqueue(MockResponse().setResponseCode(503).setBody("down"))
         val store = InMemoryStore(old)

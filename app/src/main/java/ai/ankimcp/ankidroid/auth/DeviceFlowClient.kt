@@ -151,7 +151,8 @@ class DeviceFlowClient(
         throw AuthException("Device code expired before authorization. Please restart login.", "expired_token")
     }
 
-    suspend fun refresh(refreshToken: String): Credentials {
+    /** [previousIdToken] is kept when the response has no `id_token` of its own. */
+    suspend fun refresh(refreshToken: String, previousIdToken: String? = null): Credentials {
         val data = post(
             tokenEndpoint,
             mapOf(
@@ -160,10 +161,10 @@ class DeviceFlowClient(
                 "client_id" to clientId,
             ),
         )
-        return buildCredentials(data)
+        return buildCredentials(data, previousIdToken)
     }
 
-    private fun buildCredentials(data: JsonObject): Credentials = try {
+    private fun buildCredentials(data: JsonObject, previousIdToken: String? = null): Credentials = try {
         val expiresIn = data.requireLong("expires_in")
         val user = data["user"] as? JsonObject ?: throw IllegalArgumentException("missing 'user'")
         Credentials(
@@ -171,6 +172,7 @@ class DeviceFlowClient(
             refreshToken = data.requireString("refresh_token"),
             expiresAt = Instant.now(clock).plusSeconds(expiresIn).toString(),
             user = CredentialsJson.decodeFromJsonElement(UserInfo.serializer(), user),
+            idToken = data.optString("id_token")?.takeIf { it.isNotBlank() } ?: previousIdToken,
         )
     } catch (e: IllegalArgumentException) {
         throw AuthException("Malformed token response: ${e.message}", "invalid_response", e)

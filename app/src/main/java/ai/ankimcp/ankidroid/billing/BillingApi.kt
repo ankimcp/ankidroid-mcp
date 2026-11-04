@@ -66,6 +66,8 @@ enum class PlanStatusKind { Free, Active, Grace, Canceled, Unknown }
 
 enum class PlanProvider { None, GooglePlay, Polar, Paddle, Admin, Unknown }
 
+enum class BillingInterval { Month, Year }
+
 /** `GET /billing/status` (docs/PROTOCOL.md). */
 data class PlanStatus(
     val tier: String,
@@ -76,6 +78,8 @@ data class PlanStatus(
     val cancelAtPeriodEnd: Boolean,
     /** Set only for google_play with billing enabled on that environment. */
     val productId: String?,
+    /** The paid period's interval; null without one, for an unknown value, and from servers before it existed. */
+    val interval: BillingInterval? = null,
 )
 
 /** The two google-play calls the purchase flow needs. */
@@ -265,6 +269,11 @@ class BillingApi(
                 currentPeriodEndsAt = json.string("currentPeriodEndsAt")?.let(Credentials::parseIso8601),
                 cancelAtPeriodEnd = (json["cancelAtPeriodEnd"] as? JsonPrimitive)?.booleanOrNull ?: false,
                 productId = json.string("productId")?.takeIf { it.isNotEmpty() },
+                interval = when (json.string("interval")) {
+                    "month" -> BillingInterval.Month
+                    "year" -> BillingInterval.Year
+                    else -> null
+                },
             )
         }
 

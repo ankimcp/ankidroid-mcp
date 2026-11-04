@@ -99,6 +99,10 @@ class LogReportTest {
         assertEquals("{\"access_token\": \"[redacted]\"}", LogReport.redact("{\"access_token\": \"abc123\"}"))
         assertEquals("token: [redacted]", LogReport.redact("token: s3krit"))
         assertEquals("password=[redacted]", LogReport.redact("password=longenough"))
+        assertEquals(
+            "logout?id_token_hint=[redacted]&post_logout_redirect_uri=x",
+            LogReport.redact("logout?id_token_hint=opaque.value&post_logout_redirect_uri=x"),
+        )
     }
 
     @Test

@@ -38,6 +38,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
@@ -140,6 +141,18 @@ private fun AppRoot(viewModel: MainViewModel) {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     askNotifications.launch(Manifest.permission.POST_NOTIFICATIONS)
                 }
+            }
+        }
+    }
+
+    // After sign-out: ends the browser's Keycloak session (D64). Waits until started, like the request
+    // above; the URL is held process-wide, so it still opens if the user left during sign-out.
+    val context = LocalContext.current
+    LaunchedEffect(lifecycleOwner) {
+        lifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            viewModel.pendingEndSession.url.collect {
+                val url = viewModel.pendingEndSession.take() ?: return@collect
+                if (!openEndSession(context, url)) viewModel.endSessionOpenFailed()
             }
         }
     }

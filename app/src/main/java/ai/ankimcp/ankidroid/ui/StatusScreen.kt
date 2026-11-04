@@ -54,7 +54,7 @@ import java.util.Date
 
 /** The Plan card's actions (D62). */
 class PlanCallbacks(
-    val onSubscribe: (productId: String) -> Unit,
+    val onSubscribe: (productId: String, basePlanId: String) -> Unit,
     val onRefresh: () -> Unit,
     val onRetry: () -> Unit,
     val onDismiss: () -> Unit,

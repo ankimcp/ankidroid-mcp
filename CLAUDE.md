@@ -11,7 +11,7 @@ through its ContentProvider. Single `app` module, package `ai.ankimcp.ankidroid`
 ./gradlew :app:testDebugUnitTest --tests 'ai.ankimcp.ankidroid.tunnel.TunnelClientTest'
 ./gradlew :app:lintDebug
 ./gradlew :app:assembleRelease                                   # R8, unsigned
-./gradlew :app:assembleDebug -Pankimcp.tunnelUrl=wss://ankidroid.ankimcp.uk   # dev relay
+./gradlew :app:assembleDebug -Pankimcp.tunnelUrl=wss://ankidroid.ankimcp.uk -Pankimcp.authUrl=https://auth.ankimcp.uk/realms/ankimcp   # dev relay + dev Keycloak; tunnelUrl alone fails (D64)
 ```
 
 Needs JDK 17+ and Android SDK platform 36. Versions live in `gradle/libs.versions.toml`;
@@ -24,14 +24,16 @@ see README); without it the google-services plugin is skipped and push is unavai
 ```
 app/src/main/java/ai/ankimcp/ankidroid/
   AnkiMcpApp.kt, AppGraph.kt   manual DI; AppGraph owns the long-lived objects
-  config/      AppConfig (BuildConfig.TUNNEL_URL, version)
+  config/      AppConfig (BuildConfig.TUNNEL_URL, AUTH_URL = Keycloak realm base, version)
   settings/    ConnectionSettings (IdleWindow 15/30/60; drops the old connection_mode and
                keep_connected keys, D50), FreezeNotice (persisted "phone froze us"
                flag), LocalServerSettings (local server switch, port, "Wi-Fi only" sign-in
                skip), DetailedLogging (Log tab switch, auto-off after 24 h, D61),
                RemoteAccessSettings (the Remote access switch, default on, D63), KeyValueStore
                (SharedPreferences seam)
-  auth/        DeviceFlowClient, Credentials, CredentialStore (Keystore AES-GCM), TokenRefresher
+  auth/        DeviceFlowClient, Credentials (+ id_token), CredentialStore (Keystore AES-GCM),
+               TokenRefresher, EndSession (Keycloak sign-out URL, D64), PendingEndSession
+               (in-memory URL waiting for MainActivity)
   tunnel/      Protocol (messages, close codes), TunnelClient (OkHttp WS, one connection,
                freeze-aware ping watchdog), RequestDedupe (process-wide at-most-once per
                request_id, D52), ReconnectPolicy, TunnelConnection (reconnect state
@@ -45,7 +47,9 @@ app/src/main/java/ai/ankimcp/ankidroid/
   billing/     Play subscriptions (D62): BillingGateway (plain-Kotlin seam) + PlayBilling (the only
                Play Billing Library import), BillingApi (/billing/status, /billing/google-play/
                prepare and /purchase), BillingCoordinator (purchase state machine, restore, never
-               acknowledges: the server does), RegisteredPurchases (SHA-256 of accepted tokens)
+               acknowledges: the server does), RegisteredPurchases (SHA-256 of accepted tokens),
+               BillingProducts (monthly/yearly base plans, replacementMode), PlayOffers
+               (OfferSelection: base offer + `promo`-tagged offer shape check)
   mcp/         JsonRpc, McpServer (stateless; tools, prompts, resources), Tool + ToolRegistry
                (readOnly/writeAnnotations), PromptsAndResources (Prompt, Resource, registries)
   local/       Local Wi-Fi MCP server (D53-D56): McpHttpAdapter (Streamable HTTP over McpServer;
@@ -81,7 +85,7 @@ app/src/main/java/ai/ankimcp/ankidroid/
   ui/          MainActivity (Status/Log/About bottom navigation), MainViewModel, SignInCard, Onboarding/
                Status/Log/About screens, LocalServerCard, PlanCard (+ planCardUi derivation),
                Clipboard, Theme (brand colours +
-               StatusColors)
+               StatusColors), SignedOutRedirectActivity (sign-out redirect trampoline, D64)
   log/         TunnelLog (100-entry ring buffer shown in the UI, single entry point, feeds
                LogSinks), FileLogSink (always-on rotating file log, 2 x 1 MB, redacted, own
                thread, D61), LogReport (shared-log text and redaction), LogcatReader (the app's own

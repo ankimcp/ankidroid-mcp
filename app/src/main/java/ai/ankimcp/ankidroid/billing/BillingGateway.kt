@@ -11,7 +11,10 @@ interface BillingGateway {
     /** Results of `launchBillingFlow` and purchases that change while the app runs (pending -> purchased). */
     val updates: Flow<PurchaseUpdate>
 
-    /** The subscriptions' base-plan offers, in Play's order; products Play does not know are left out. */
+    /**
+     * The subscriptions' base-plan offers ([BillingProducts.BASE_PLANS]), one item per product
+     * and base plan, in Play's order; products or base plans Play does not have are left out.
+     */
     suspend fun products(productIds: List<String>): GatewayResult<List<SubscriptionProduct>>
 
     /** Active subscription purchases of the Google account on this device. */
@@ -24,13 +27,34 @@ interface BillingGateway {
 /** The screen a purchase is started from (the Activity in [PlayBilling]); never kept after the launch. */
 interface PurchaseHost
 
+/** One sellable item: a product's base plan, through that base plan's own offer. */
 data class SubscriptionProduct(
     val productId: String,
+    /** [BillingProducts.MONTHLY] or [BillingProducts.YEARLY]. */
+    val basePlanId: String,
     /** Play's localised recurring price, e.g. "€4.99". */
     val formattedPrice: String,
     /** ISO 8601 period of the recurring phase, e.g. "P1M". */
     val billingPeriod: String,
+    /** The base plan's own offer. */
     val offerToken: String,
+    /** A `promo`-tagged offer chosen by [OfferSelection]; offered to everyone who sees the plan. */
+    val promo: PromoOffer? = null,
+) {
+    /** What a purchase or plan change launches with: the promo when there is one. */
+    val launchOfferToken: String get() = promo?.offerToken ?: offerToken
+}
+
+/** One discounted phase, then the base plan's recurring price. */
+data class PromoOffer(
+    val offerId: String,
+    val offerToken: String,
+    /** Play's localised discounted price, e.g. "$35.00". */
+    val formattedPrice: String,
+    /** ISO 8601 period of the discounted phase, e.g. "P1Y". */
+    val billingPeriod: String,
+    /** How many [billingPeriod]s the discount lasts; 1 for a one-time charge. */
+    val billingCycleCount: Int,
 )
 
 data class PlayPurchase(
@@ -46,21 +70,34 @@ data class PlayPurchase(
     override fun toString(): String = "PlayPurchase(products=$productIds, state=$state, acknowledged=$acknowledged)"
 }
 
-/** How Play moves an existing subscription to another product (D62). */
+/** How Play moves an existing subscription to another product or base plan (D62). */
 enum class ReplacementMode {
     /** Upgrade: immediate, same billing date, the difference for the rest of the period is charged now. */
     ChargeProratedPrice,
 
     /** Downgrade: the higher plan runs to the end of the period, the cheaper one starts at renewal. */
     Deferred,
+
+    /**
+     * Same product, monthly to yearly: the year starts now at full price, the unused month is
+     * credited. Also an upgrade launched with a promo offer: immediate, the old plan's remaining
+     * value prorated for time.
+     */
+    ChargeFullPrice,
+
+    /** Same product, yearly to monthly: switched now, the paid year is kept, the monthly price from renewal. */
+    WithoutProration,
 }
 
 data class ReplaceRequest(
     val oldPurchaseToken: String,
     val oldProductId: String,
+    /** Only for the log line: Play takes the old product, not its base plan. */
+    val oldBasePlanId: String,
     val mode: ReplacementMode,
 ) {
-    override fun toString(): String = "ReplaceRequest(oldProductId=$oldProductId, mode=$mode)"
+    override fun toString(): String =
+        "ReplaceRequest(oldProductId=$oldProductId, oldBasePlanId=$oldBasePlanId, mode=$mode)"
 }
 
 data class LaunchRequest(

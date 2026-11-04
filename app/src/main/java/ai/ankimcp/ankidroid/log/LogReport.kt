@@ -91,7 +91,7 @@ object LogReport {
     )
     // The value is redacted only if it has 8+ characters or a digit, so "Invalid token: expired" stays readable.
     private val KEY_VALUE = Regex(
-        """(?i)\b(access_token|refresh_token|id_token|device_code|token|password|secret|api_key)(["']?\s*[:=]\s*["']?)([^\s"',;&]+)""",
+        """(?i)\b(access_token|refresh_token|id_token_hint|id_token|device_code|token|password|secret|api_key)(["']?\s*[:=]\s*["']?)([^\s"',;&]+)""",
     )
 
     // Three dot-separated base64url segments, as in a JWT ("eyJ...").

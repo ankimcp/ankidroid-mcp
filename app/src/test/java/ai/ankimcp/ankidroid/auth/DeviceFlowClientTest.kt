@@ -276,6 +276,36 @@ class DeviceFlowClientTest {
     }
 
     @Test
+    fun `device-code grant stores the id_token`() = runBlocking {
+        server.enqueue(json(200, tokenBody.replace("\"rt-1\",", "\"rt-1\",\"id_token\":\"idt-1\",")))
+
+        val credentials = client().pollForToken("dc", intervalSeconds = 5, expiresInSeconds = 600)
+
+        assertEquals("idt-1", credentials.idToken)
+    }
+
+    @Test
+    fun `device-code grant without id_token leaves it null`() = runBlocking {
+        server.enqueue(json(200, tokenBody))
+
+        assertNull(client().pollForToken("dc", intervalSeconds = 5, expiresInSeconds = 600).idToken)
+    }
+
+    @Test
+    fun `refresh takes the fresh id_token over the previous one`() = runBlocking {
+        server.enqueue(json(200, tokenBody.replace("\"rt-1\",", "\"rt-1\",\"id_token\":\"idt-2\",")))
+
+        assertEquals("idt-2", client().refresh("rt-0", previousIdToken = "idt-1").idToken)
+    }
+
+    @Test
+    fun `refresh without id_token keeps the previous one`() = runBlocking {
+        server.enqueue(json(200, tokenBody))
+
+        assertEquals("idt-1", client().refresh("rt-0", previousIdToken = "idt-1").idToken)
+    }
+
+    @Test
     fun `refresh surfaces invalid_grant`() {
         server.enqueue(json(400, """{"error":"invalid_grant","error_description":"Token is not active"}"""))
 

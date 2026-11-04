@@ -253,9 +253,12 @@ Point a debug build at another relay, e.g. the development deployment, or a loca
 emulator:
 
 ```sh
-./gradlew :app:assembleDebug -Pankimcp.tunnelUrl=wss://ankidroid.ankimcp.uk
-./gradlew :app:assembleDebug -Pankimcp.tunnelUrl=ws://10.0.2.2:3004
+./gradlew :app:assembleDebug -Pankimcp.tunnelUrl=wss://ankidroid.ankimcp.uk -Pankimcp.authUrl=https://auth.ankimcp.uk/realms/ankimcp
+./gradlew :app:assembleDebug -Pankimcp.tunnelUrl=ws://10.0.2.2:3004 -Pankimcp.authUrl=http://10.0.2.2:8080/realms/ankimcp
 ```
+
+The build fails when `tunnelUrl` is set without `authUrl`, which must be the Keycloak realm
+the relay uses (sign-out goes there).
 
 Release builds always use `wss://ankidroid.ankimcp.ai`. Cleartext `ws://` is only allowed to
 `10.0.2.2`, `localhost` and `127.0.0.1`.

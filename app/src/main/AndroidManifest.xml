@@ -40,6 +40,22 @@
             </intent-filter>
         </activity>
 
+        <!-- Keycloak's post-logout redirect (D64): back to MainActivity, closing the sign-out tab. -->
+        <activity
+            android:name=".ui.SignedOutRedirectActivity"
+            android:exported="true"
+            android:noHistory="true"
+            android:theme="@android:style/Theme.NoDisplay">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:host="signed-out"
+                    android:scheme="ai.ankimcp.ankidroid" />
+            </intent-filter>
+        </activity>
+
         <service
             android:name=".service.TunnelForegroundService"
             android:exported="false"

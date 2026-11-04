@@ -8,6 +8,7 @@ import ai.ankimcp.ankidroid.auth.CredentialStore
 import ai.ankimcp.ankidroid.auth.DeviceFlowClient
 import ai.ankimcp.ankidroid.auth.KeystoreCredentialCipher
 import ai.ankimcp.ankidroid.auth.KeystoreCredentialStore
+import ai.ankimcp.ankidroid.auth.PendingEndSession
 import ai.ankimcp.ankidroid.auth.SharedPreferencesBlobStorage
 import ai.ankimcp.ankidroid.auth.TokenRefresher
 import ai.ankimcp.ankidroid.billing.BillingApi
@@ -181,6 +182,7 @@ class AppGraph(context: Context) {
     val credentialStore: CredentialStore = KeystoreCredentialStore(appContext)
     val deviceFlowClient = DeviceFlowClient(config.tunnelUrl, authHttp, elapsedClock = AndroidElapsedClock)
     val tokenRefresher = TokenRefresher(credentialStore, deviceFlowClient)
+    val pendingEndSession = PendingEndSession()
 
     private val billingApi = BillingApi(config.tunnelUrl, authHttp, credentialStore, tokenRefresher, log)
 

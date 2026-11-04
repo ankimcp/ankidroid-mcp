@@ -32,7 +32,7 @@ class TokenRefresher(
             return RefreshOutcome.Refreshed(stored)
         }
         try {
-            val fresh = client.refresh(stored.refreshToken)
+            val fresh = client.refresh(stored.refreshToken, previousIdToken = stored.idToken)
             // Logout (or a new sign-in) during the HTTP call wins; never resurrect old credentials.
             if (store.replace(stored, fresh)) {
                 RefreshOutcome.Refreshed(fresh)

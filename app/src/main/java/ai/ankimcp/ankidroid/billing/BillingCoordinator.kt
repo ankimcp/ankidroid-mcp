@@ -16,11 +16,14 @@ import kotlinx.coroutines.launch
 sealed interface Catalog {
     data object Loading : Catalog
 
-    data class Loaded(
-        val products: List<SubscriptionProduct>,
-        /** Our products Play did not return, or returned without the `monthly` base plan offer. */
-        val missing: List<String> = emptyList(),
-    ) : Catalog
+    /** One item per product and base plan Play offers, sorted by tier, monthly before yearly. */
+    data class Loaded(val products: List<SubscriptionProduct>) : Catalog {
+        /** Our products Play did not return, or returned without [basePlanId]'s offer. */
+        fun missing(basePlanId: String = BillingProducts.MONTHLY): List<String> =
+            BillingProducts.ALL.filter { id -> products.none { it.productId == id && it.basePlanId == basePlanId } }
+
+        fun offers(basePlanId: String): Boolean = products.any { it.basePlanId == basePlanId }
+    }
 
     data class Unavailable(val error: GatewayError) : Catalog
 }
@@ -232,11 +235,11 @@ class BillingCoordinator(
      * [host] is asked for the current screen only when Play's sheet is about to open, so no
      * Activity is held across `/prepare`; null means it is finishing or gone.
      */
-    fun subscribe(productId: String, host: () -> PurchaseHost?) {
+    fun subscribe(productId: String, basePlanId: String, host: () -> PurchaseHost?) {
         synchronized(lock) {
             if (_state.value.flow.blocksPurchase || flowJob?.isActive == true) return
             setFlow(PurchaseFlow.Preparing(productId))
-            flowJob = track { runPurchase(productId, host) }
+            flowJob = track { runPurchase(productId, basePlanId, host) }
         }
     }
 
@@ -260,8 +263,9 @@ class BillingCoordinator(
         }
     }
 
-    private suspend fun runPurchase(productId: String, host: () -> PurchaseHost?) {
-        val product = (_state.value.catalog as? Catalog.Loaded)?.products?.firstOrNull { it.productId == productId }
+    private suspend fun runPurchase(productId: String, basePlanId: String, host: () -> PurchaseHost?) {
+        val product = (_state.value.catalog as? Catalog.Loaded)?.products
+            ?.firstOrNull { it.productId == productId && it.basePlanId == basePlanId }
             ?: return fail(BillingError.ProductUnavailable)
         val gen = generation
         val prepare = when (val result = backend.prepare()) {
@@ -279,12 +283,24 @@ class BillingCoordinator(
             PrepareMode.New -> null
             PrepareMode.Replace -> {
                 val current = prepare.currentProductId
-                if (current == productId) {
-                    setFlow(PurchaseFlow.Idle)
-                    loadStatus()
-                    return
+                if (current == null) {
+                    null
+                } else {
+                    val currentBasePlan = currentBasePlan(current)
+                    val mode = BillingProducts.replacementMode(
+                        current,
+                        currentBasePlan,
+                        productId,
+                        basePlanId,
+                        withPromo = product.promo != null,
+                    )
+                    if (mode == null) {
+                        setFlow(PurchaseFlow.Idle)
+                        loadStatus()
+                        return
+                    }
+                    replaceRequest(current, currentBasePlan, mode) ?: return
                 }
-                if (current == null) null else replaceRequest(current, productId) ?: return
             }
         }
         val screen = host() ?: run {
@@ -294,8 +310,9 @@ class BillingCoordinator(
         launchProducts = setOfNotNull(productId, replace?.oldProductId)
         setFlow(PurchaseFlow.Launching(productId))
         log.info(
-            "Billing: opening Google Play for $productId" +
-                (replace?.let { " (replacing ${it.oldProductId}, ${it.mode})" } ?: ""),
+            "Billing: opening Google Play for $productId/$basePlanId" +
+                (product.promo?.let { " with offer ${it.offerId}" } ?: "") +
+                (replace?.let { " (replacing ${it.oldProductId}/${it.oldBasePlanId}, ${it.mode})" } ?: ""),
         )
         when (val launched = gateway.launch(screen, LaunchRequest(product, prepare.obfuscatedAccountId, replace))) {
             is GatewayResult.Ok -> Unit
@@ -307,8 +324,18 @@ class BillingCoordinator(
         }
     }
 
+    /**
+     * The live subscription's base plan, from the latest loaded status when it is about [current];
+     * no interval (purchases from before yearly existed, or no status) is monthly.
+     */
+    private fun currentBasePlan(current: String): String {
+        val status = (_state.value.plan as? PlanLoad.Loaded)?.status
+            ?.takeIf { it.provider == PlanProvider.GooglePlay && it.productId == current }
+        return BillingProducts.basePlanFor(status?.interval)
+    }
+
     /** The old purchase for a plan change, or null after setting the error. */
-    private suspend fun replaceRequest(current: String, productId: String): ReplaceRequest? {
+    private suspend fun replaceRequest(current: String, currentBasePlan: String, mode: ReplacementMode): ReplaceRequest? {
         val purchases = when (val result = gateway.purchases()) {
             is GatewayResult.Ok -> result.value
             is GatewayResult.Error -> {
@@ -322,12 +349,7 @@ class BillingCoordinator(
             fail(BillingError.ReplaceOtherAccount)
             return null
         }
-        val mode = if (BillingProducts.rank(productId) > BillingProducts.rank(current)) {
-            ReplacementMode.ChargeProratedPrice
-        } else {
-            ReplacementMode.Deferred
-        }
-        return ReplaceRequest(old.purchaseToken, current, mode)
+        return ReplaceRequest(old.purchaseToken, current, currentBasePlan, mode)
     }
 
     private fun onUpdate(update: PurchaseUpdate) {
@@ -624,13 +646,14 @@ class BillingCoordinator(
         _state.update {
             it.copy(
                 catalog = when (result) {
-                    is GatewayResult.Ok -> {
-                        val found = result.value.map { product -> product.productId }.toSet()
-                        Catalog.Loaded(
-                            products = result.value.sortedBy { product -> BillingProducts.rank(product.productId) },
-                            missing = BillingProducts.ALL.filterNot { id -> id in found },
-                        )
-                    }
+                    is GatewayResult.Ok -> Catalog.Loaded(
+                        result.value.sortedWith(
+                            compareBy(
+                                { product -> BillingProducts.rank(product.productId) },
+                                { product -> BillingProducts.BASE_PLANS.indexOf(product.basePlanId) },
+                            ),
+                        ),
+                    )
                     is GatewayResult.Error -> Catalog.Unavailable(result.error)
                 },
             )

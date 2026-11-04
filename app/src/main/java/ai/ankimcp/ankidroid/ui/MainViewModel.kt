@@ -4,6 +4,10 @@ import ai.ankimcp.ankidroid.anki.AnkiDroidAvailability
 import ai.ankimcp.ankidroid.appGraph
 import ai.ankimcp.ankidroid.auth.AuthException
 import ai.ankimcp.ankidroid.auth.DeviceFlowClient
+import ai.ankimcp.ankidroid.auth.PendingEndSession
+import ai.ankimcp.ankidroid.auth.SIGNED_OUT_REDIRECT
+import ai.ankimcp.ankidroid.auth.endSessionUrl
+import ai.ankimcp.ankidroid.config.AppConfig
 import ai.ankimcp.ankidroid.billing.BillingState
 import ai.ankimcp.ankidroid.billing.CurrentActivity
 import ai.ankimcp.ankidroid.local.LocalServerState
@@ -116,6 +120,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      */
     val notificationPermissionRequests: Flow<Unit> = _notificationPermissionRequests.receiveAsFlow()
 
+    /**
+     * Keycloak sign-out URL to open in a Custom Tab once local sign-out is done, so the browser's
+     * SSO session does not sign the next account in as the old one (D64). Process-wide, so it
+     * outlives this ViewModel. Contains the id_token: never log it.
+     */
+    val pendingEndSession: PendingEndSession = graph.pendingEndSession
+
     private var signInJob: Job? = null
 
     /** The phone froze a running tunnel; cleared once battery optimisation is turned off. */
@@ -156,8 +167,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /** The Activity is looked up only when Play's sheet opens, after `/prepare` (D62). */
-    fun subscribe(productId: String) {
-        graph.billing.subscribe(productId, CurrentActivity::host)
+    fun subscribe(productId: String, basePlanId: String) {
+        graph.billing.subscribe(productId, basePlanId, CurrentActivity::host)
     }
 
     fun retryBilling() = graph.billing.retry()
@@ -398,11 +409,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _signingOut.value = true
         // Before the disconnect, so a wake-up arriving in between cannot reconnect.
         graph.push.beginLogout()
+        // Read before the clear below; the browser step needs it afterwards.
+        val idToken = credentials.value?.idToken
         try {
             disconnect()
             graph.appScope.launch(Dispatchers.IO) {
                 try {
                     graph.push.logout { graph.credentialStore.clear() }
+                    // Local sign-out is done (push.logout clears even on timeout); the browser step cannot undo it.
+                    graph.pendingEndSession.set(
+                        endSessionUrl(graph.config.authUrl, idToken, AppConfig.OAUTH_CLIENT_ID, SIGNED_OUT_REDIRECT),
+                    )
                     graph.billing.onSignedOut()
                     // A wake-up that got past the signing-out check may have started a run meanwhile.
                     graph.tunnel.stop("Signed out")
@@ -418,6 +435,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _signingOut.value = false
             graph.log.warn("Could not sign out: ${e.message ?: e.javaClass.simpleName}")
         }
+    }
+
+    /** Neither a Custom Tab nor a browser could open the sign-out page; local sign-out stands. */
+    fun endSessionOpenFailed() {
+        graph.log.warn("Could not open the browser to finish sign-out")
     }
 
     private fun requestNotificationPermission() {

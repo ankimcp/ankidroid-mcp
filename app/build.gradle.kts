@@ -56,6 +56,18 @@ if (releaseSigningEnv == null) {
 val defaultTunnelUrl = "wss://ankidroid.ankimcp.ai"
 val devTunnelUrl: String =
     providers.gradleProperty("ankimcp.tunnelUrl").orElse(defaultTunnelUrl).get()
+// Keycloak realm base for the sign-out page (D64); set separately, not derived from the tunnel URL.
+val defaultAuthUrl = "https://auth.ankimcp.ai/realms/ankimcp"
+val devAuthUrl: String =
+    providers.gradleProperty("ankimcp.authUrl").orElse(defaultAuthUrl).get()
+if (providers.gradleProperty("ankimcp.tunnelUrl").isPresent &&
+    !providers.gradleProperty("ankimcp.authUrl").isPresent
+) {
+    throw GradleException(
+        "-Pankimcp.tunnelUrl is set but -Pankimcp.authUrl is not: sign-out would go to the prod " +
+            "Keycloak. Set both, e.g. -Pankimcp.authUrl=https://auth.ankimcp.uk/realms/ankimcp for the dev relay.",
+    )
+}
 
 android {
     namespace = "ai.ankimcp.ankidroid"
@@ -83,9 +95,11 @@ android {
     buildTypes {
         debug {
             buildConfigField("String", "TUNNEL_URL", "\"$devTunnelUrl\"")
+            buildConfigField("String", "AUTH_URL", "\"$devAuthUrl\"")
         }
         release {
             buildConfigField("String", "TUNNEL_URL", "\"$defaultTunnelUrl\"")
+            buildConfigField("String", "AUTH_URL", "\"$defaultAuthUrl\"")
             if (releaseSigningEnv != null) {
                 signingConfig = signingConfigs.getByName("release")
             }

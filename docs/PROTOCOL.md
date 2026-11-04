@@ -63,6 +63,17 @@ All requests are `application/x-www-form-urlencoded`; `client_id=ankimcp-cli`.
    CLI).
 5. Refresh: `POST /auth/token` with `grant_type=refresh_token`, `refresh_token`, `client_id`.
    Same response shape. A token is considered expired 60 s before `expires_at`.
+6. `id_token`: with `scope=openid` the token response (device-code and refresh grants) also
+   carries Keycloak's `id_token`. The app stores it as an optional `id_token` key next to the
+   fields above (older stored JSON without it still parses); a refresh response without one
+   keeps the previous value. It is never sent to the relay.
+7. Sign-out (docs/DECISIONS.md D64): after the local credentials are cleared, the app opens
+   Keycloak's end-session endpoint in a Custom Tab, not through the relay:
+   `GET {AUTH_URL}/protocol/openid-connect/logout?id_token_hint=<id_token>&post_logout_redirect_uri=ai.ankimcp.ankidroid%3A%2F%2Fsigned-out`,
+   or `client_id=ankimcp-cli` instead of `id_token_hint` when no id_token is stored (Keycloak
+   then asks for confirmation). `AUTH_URL` is `https://auth.ankimcp.ai/realms/ankimcp` (prod)
+   or `https://auth.ankimcp.uk/realms/ankimcp` (dev, `-Pankimcp.authUrl`). Keycloak redirects
+   to `ai.ankimcp.ankidroid://signed-out`, which returns to the app.
 
 Error parsing: the body is parsed as JSON first (non-JSON -> error with no code); any
 non-2xx status raises with `error` (default `unknown_error`) and `error_description`
@@ -274,7 +285,8 @@ GET /billing/status
         "provider":"none"|"google_play"|"polar"|"paddle"|"admin",
         "currentPeriodEndsAt":"<ISO-8601 UTC>"|null,
         "cancelAtPeriodEnd":true|false,
-        "productId":"<Play product id>"|null}
+        "productId":"<Play product id>"|null,
+        "interval":"month"|"year"|null}
 ```
 
 - `tier` free: `status` free, `provider` none, no period, no `productId` (a plan that expired
@@ -284,6 +296,11 @@ GET /billing/status
   canceled), canceled when `cancelAtPeriodEnd` (still entitled until `currentPeriodEndsAt`),
   otherwise active. Play's ON_HOLD, PAUSED and EXPIRED never appear (the server downgrades to
   free). `productId` only for google_play, and only where Play billing is on.
+- `interval`: the paid period's length, only while there is a provider-held period end (null
+  for free and admin). For google_play the server derives it from the purchase's base plan
+  (`monthly` -> month, `yearly` -> year). The app reads a google_play status with a null,
+  missing or unknown `interval` as monthly (purchases from before the field existed are
+  monthly). Promotional offers do not change it: the server reads only product and base plan.
 - Errors: 401 bad token, 500 when the user service is unreachable (no 503).
 - A relay without the billing routes (dev before deployment answers 405): the app treats 404,
   405 and 501 here as "billing not available on this server", logs one warning line and shows
@@ -294,7 +311,7 @@ The app reads it after sign-in, when it comes to the front signed in (at most on
 after a successful purchase, and on the Plan card's Refresh. Parsing is defensive: a missing
 `tier` is an error; an unknown `status` or `provider` parses as unknown (the card treats an
 unknown provider as managed on the web); a `currentPeriodEndsAt` that is null or does not
-parse is no date. The app also copies `tier` into the stored account so the account card's
+parse is no date; an `interval` other than `month` or `year` is none. The app also copies `tier` into the stored account so the account card's
 "Plan:" line matches until the next token refresh.
 
 ### Prepare a purchase
@@ -305,7 +322,9 @@ POST /billing/google-play/prepare          (no body)
 ```
 
 - `new`: no live Play subscription; buy either product.
-- `replace`: a live Play subscription (`currentProductId`); another product is a plan change.
+- `replace`: a live Play subscription (`currentProductId`); another product, or the same
+  product on another base plan, is a plan change. There is no interval here: the app takes the
+  current base plan from the last `/billing/status` `interval` (null is monthly).
 - `blocked`: the account is entitled through the web or an admin grant; no purchase.
 - The app passes `obfuscatedAccountId` to `BillingFlowParams.setObfuscatedAccountId`
   unchanged; without it `/purchase` answers 403. A response whose id is not 64 hex characters
@@ -566,3 +585,6 @@ D53-D56.
     whichever connection carries it, ignoring a second reply for an id it already answered.
     A process restart empties the table, so a request cut off by process death can still run
     twice (D52). The add-on has no dedupe.
+18. **Browser sign-out** (additive, D64): the app stores the token response's `id_token` and,
+    on sign-out, opens Keycloak's end-session endpoint in a Custom Tab (Auth, items 6-7). The
+    add-on only deletes its credentials file. Relay frames and auth requests are unchanged.

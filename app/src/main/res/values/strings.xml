@@ -67,6 +67,68 @@
     <string name="plan_granted">Granted to your account; nothing to pay.</string>
     <string name="plan_managed_on_web">Your plan is managed on the web, in your AnkiMCP dashboard.</string>
     <string name="plan_price_monthly">%1$s / month</string>
+    <string name="plan_price_yearly">%1$s / year</string>
+    <string name="plan_interval_monthly">Monthly</string>
+    <string name="plan_interval_yearly">Yearly</string>
+    <string name="plan_switch_to_monthly">Switch to monthly</string>
+    <string name="plan_switch_to_yearly">Switch to yearly</string>
+    <string name="plan_promo_label">Offer</string>
+    <!-- Promotional offers: %1$s discounted price, %2$s the regular price label, %3$d the count. -->
+    <plurals name="plan_promo_first_days">
+        <item quantity="one">%1$s for the first day, then %2$s</item>
+        <item quantity="other">%1$s for the first %3$d days, then %2$s</item>
+    </plurals>
+    <plurals name="plan_promo_first_weeks">
+        <item quantity="one">%1$s for the first week, then %2$s</item>
+        <item quantity="other">%1$s for the first %3$d weeks, then %2$s</item>
+    </plurals>
+    <plurals name="plan_promo_first_months">
+        <item quantity="one">%1$s for the first month, then %2$s</item>
+        <item quantity="other">%1$s for the first %3$d months, then %2$s</item>
+    </plurals>
+    <plurals name="plan_promo_first_years">
+        <item quantity="one">%1$s for the first year, then %2$s</item>
+        <item quantity="other">%1$s for the first %3$d years, then %2$s</item>
+    </plurals>
+    <plurals name="plan_promo_per_day">
+        <item quantity="one">%1$s / day for %3$d day, then %2$s</item>
+        <item quantity="other">%1$s / day for %3$d days, then %2$s</item>
+    </plurals>
+    <plurals name="plan_promo_per_week">
+        <item quantity="one">%1$s / week for %3$d week, then %2$s</item>
+        <item quantity="other">%1$s / week for %3$d weeks, then %2$s</item>
+    </plurals>
+    <plurals name="plan_promo_per_month">
+        <item quantity="one">%1$s / month for %3$d month, then %2$s</item>
+        <item quantity="other">%1$s / month for %3$d months, then %2$s</item>
+    </plurals>
+    <plurals name="plan_promo_per_year">
+        <item quantity="one">%1$s / year for %3$d year, then %2$s</item>
+        <item quantity="other">%1$s / year for %3$d years, then %2$s</item>
+    </plurals>
+    <!-- %1$s discounted price, %2$s its period ("1 year 6 months", or Play's ISO 8601 text when unreadable), %3$s the regular price label. -->
+    <string name="plan_promo_other">%1$s for %2$s, then %3$s</string>
+    <!-- As plan_promo_other, charged %4$d times: "$12.00 / 3 months for 2 periods, then $5.00 / month". -->
+    <plurals name="plan_promo_other_cycles">
+        <item quantity="one">%1$s / %2$s for %4$d period, then %3$s</item>
+        <item quantity="other">%1$s / %2$s for %4$d periods, then %3$s</item>
+    </plurals>
+    <plurals name="plan_period_days">
+        <item quantity="one">%d day</item>
+        <item quantity="other">%d days</item>
+    </plurals>
+    <plurals name="plan_period_weeks">
+        <item quantity="one">%d week</item>
+        <item quantity="other">%d weeks</item>
+    </plurals>
+    <plurals name="plan_period_months">
+        <item quantity="one">%d month</item>
+        <item quantity="other">%d months</item>
+    </plurals>
+    <plurals name="plan_period_years">
+        <item quantity="one">%d year</item>
+        <item quantity="other">%d years</item>
+    </plurals>
     <string name="plan_subscribe">Subscribe</string>
     <string name="plan_current_button">Current plan</string>
     <string name="plan_switch_to">Switch to %1$s</string>

@@ -1786,14 +1786,62 @@ computer on the same Wi-Fi; claude.ai cannot reach a LAN address. Code in `local
     unit-tested with fakes. There is no acknowledge method anywhere in the app: the **server**
     acknowledges after verifying with Google (a test checks the gateway has no such method and
     that only products, purchases and launch are called).
-  - Products: `ankimcp_plus` (tier plus) and `ankimcp_pro` (tier pro), base plan `monthly`,
-    package `ai.ankimcp.ankidroid`, no trial or intro offer. Only the `monthly` base plan's own
-    offer (the one without an `offerId`) is used, never another offer instead; a product Play
-    does not return, or returns without that offer, is listed as missing and shown "Not
-    available in Google Play" with no price and no button (none available at all: "Plans are
-    not available yet"). Prices are only Play's `formattedPrice` of the recurring
-    phase, shown as "<price> / month" when the period is `P1M`; nothing in the app or its
-    strings holds a price.
+  - Products: `ankimcp_plus` (tier plus) and `ankimcp_pro` (tier pro), each with two
+    auto-renewing base plans, `monthly` (P1M) and `yearly` (P1Y), package
+    `ai.ankimcp.ankidroid`, no trial. A sellable item is (product, base plan):
+    `SubscriptionProduct` carries `basePlanId`, and the catalog holds one item per base plan
+    Play returns. Each item is the base plan's own offer (the one without an `offerId`), plus at
+    most one promotional offer (below); no other offer is ever used. A product Play does not
+    return, or returns without the `monthly` offer, is shown "Not available in Google Play"
+    with no price and no button (none available at all: "Plans are not available yet"). A
+    missing `yearly` offer breaks nothing: with no yearly offer on any product the card looks
+    exactly as before (no Monthly / Yearly switch); with yearly on only one product the other
+    shows "Not available in Google Play" while Yearly is selected. A missing monthly offer is
+    a warning in the log, a missing yearly one an info line. Prices are only Play's
+    `formattedPrice` of the recurring phase, shown as "<price> / month" for `P1M`,
+    "<price> / year" for `P1Y` and bare otherwise; nothing in the app or its strings holds a
+    price, and no savings or per-month price is shown (the price per day below only picks
+    offers).
+  - Promotional offers (owner decision 2026-11-04, for campaigns like Cyber Friday): the owner
+    creates an offer on a base plan in Play Console, tags it `promo`, and activates or
+    deactivates it there; no app release per campaign. Campaign offers use Play's
+    "Developer-determined" eligibility on purpose (for everyone: new purchases and plan
+    changes), and Play does not filter those: a `promo` offer is shown to everyone who sees the
+    plan, and the owner controls exposure only by activating and deactivating it. A campaign
+    that must be new-customers-only uses "New customer acquisition" eligibility in Play
+    Console instead; Play then leaves the offer out of `subscriptionOfferDetails` for anyone
+    else. `OfferSelection`
+    (plain Kotlin, `billing/PlayOffers.kt`, over a `PlayOffer` copy of Play's offers) accepts a
+    `promo` offer on the same base plan only with exactly two pricing phases: one paid discount
+    (`FINITE_RECURRING` with at least two cycles, or `NON_RECURRING`), then
+    `INFINITE_RECURRING` at the base offer's price, currency and period. In Play Console that
+    is a "Single payment" phase (one period, e.g. "first year 30% off"; it reports
+    `NON_RECURRING`, and its cycle count, 0 or 1, is read as one period) or a "Discounted
+    recurring payment" phase (Play Console requires at least two periods, e.g. "first 3 months
+    at $X"; a one-period discount is always a single payment, so `FINITE_RECURRING` with one
+    cycle is ignored). The discount must be in the recurring phase's currency
+    (`priceCurrencyCode`), above 0, and cheaper per day than the recurring phase: periods are
+    parsed as ISO 8601 (`BillingPeriod`, Y/M/W/D parts) and counted in twelfths of a day: a
+    year 365 days (4380), a month 365/12 days (365), a week 7 (84), a day 12, so twelve months
+    are exactly a year and "P6M" on a "P1Y" base plan is exactly half of it. Price per day is
+    the phase's price over its period's length (the same over all of a finite phase's cycles),
+    so "$4.99 for a week" on "$5.00 / month" is no discount while "$12.00 for 3 months" is. A period that does not parse makes the offer ignored. A free
+    trial, several discount phases, a different recurring price or period, or any other
+    shape is ignored with one info line per process ("Billing: ignoring offer X on P/B:
+    unsupported shape"). Of several valid ones the lowest discounted price per day wins, Play's
+    order on a tie. The item keeps its regular price and gains `promo` (offer id and token,
+    discounted price, period and cycle count); purchases and plan changes launch with the
+    promo's token when there is one (`launchOfferToken`), otherwise the base offer's. The card
+    shows the discounted price first with a small "Offer" label: "$35.00 for the first year,
+    then $50.00 / year", "$3.00 / month for 3 months, then $5.00 / month", "$1.00 for the first
+    10 days, then …", and for any other length "<price> for 1 year 6 months, then <regular>"
+    or, with more than one cycle, "$12.00 / 3 months for 2 periods, then $5.00 / month"
+    (Play's raw ISO period only when it does not parse). The user's Current row always shows
+    the regular price, never the promo: the current plan cannot be bought again. The
+    server ignores the offer (tier and interval come from product and base plan). A draft
+    sample exists for testing: `ankimcp_plus`, base plan `yearly`, offer
+    `promo-sample-yearly`, tag `promo`, developer-determined eligibility, single payment 1 year
+    at 30% off; it is inactive until the owner activates it.
   - Purchase: `POST /billing/google-play/prepare` first. `blocked` (web or admin entitlement)
     never opens Play. `new` launches with the obfuscated account id from the response; the
     server refuses a purchase without it (403), which ties every Play purchase to one AnkiMCP
@@ -1808,6 +1856,35 @@ computer on the same Wi-Fi; claude.ai cannot reach a LAN address. Code in `local
     item upgrade, where the price per unit of time increases", and recommend `DEFERRED` for
     downgrades (the user keeps Pro to the end of the paid period, Plus starts at renewal). Up
     or down is decided by the fixed tier order (Plus < Pro), not by comparing prices.
+    With yearly plans `subscribe` takes (product, base plan). The current plan is
+    (`currentProductId` from `/prepare`, the base plan of the last loaded status's `interval`
+    when that status is google_play for the same product; none is monthly). The same product
+    and base plan is "already on this plan" (no launch); the same product on the other base
+    plan is a plan change with the live purchase token, as above. The mode comes from one pure
+    function, `BillingProducts.replacementMode`:
+    - same product, monthly to yearly: `CHARGE_FULL_PRICE` (the year starts now, the unused
+      month is credited);
+    - same product, yearly to monthly: `WITHOUT_PRORATION` (switched now, the paid year is
+      kept, the monthly price is charged from the renewal);
+    - Plus to Pro, any intervals: `CHARGE_PRORATED_PRICE`, but `CHARGE_FULL_PRICE` when the
+      launch uses a promo offer token (`withPromo`);
+    - Pro to Plus, any intervals: `DEFERRED`.
+    developer.android.com/google/play/billing/subscriptions ("Set the replacement mode for a
+    purchase") says that "when switching plans within the same subscription to an
+    auto-renewing plan from either a prepaid plan or an auto-renewing plan, valid proration
+    modes are `CHARGE_FULL_PRICE` and `WITHOUT_PRORATION`", which rules out the other modes for
+    a base plan switch. `CHARGE_PRORATED_PRICE` needs the price per unit of time to rise,
+    which holds for every Plus to Pro move at the web-parity prices (Plus $5/month or $50/year,
+    Pro $15/month or $150/year), but not necessarily for a discounted promo price, so an
+    upgrade launched with a promo token uses `CHARGE_FULL_PRICE` instead, which Play allows for
+    any upgrade (immediate; the old plan's remaining value is prorated for time when the
+    entitlement changes). Same-product switches already use only `CHARGE_FULL_PRICE` and
+    `WITHOUT_PRORATION`, and deferred downgrades are unchanged. Both new modes exist in billing 9.1.0
+    (`SubscriptionProductReplacementParams.ReplacementMode`, checked with `javap`). The launch
+    log line names both base plans and the promo offer id, e.g. "Billing: opening Google Play
+    for ankimcp_plus/yearly (replacing ankimcp_plus/monthly, ChargeFullPrice)". When old and
+    new product are the same, `launchProducts` holds that one product, so the listener still
+    takes the new token as the sheet's result.
   - The Activity: `subscribe` takes a provider, asked only when Play's sheet is about to open
     (after `/prepare` and the replace lookup), so no Activity is held across network calls.
     `CurrentActivity` holds the resumed `MainActivity` weakly and returns null when it is
@@ -1905,7 +1982,9 @@ computer on the same Wi-Fi; claude.ai cannot reach a LAN address. Code in `local
     5xx and network errors stay "Could not load your plan" with Try again. The google-play
     calls do not get this mapping: a 404 there is still an error. The tier it reports is copied into the stored credentials (compare-and-set, so a
     sign-out in between wins), so the account card's "Plan: <tier>" line matches until the
-    next token refresh brings the server's own value.
+    next token refresh brings the server's own value. Its `interval` (`month`, `year`, else
+    none) is the current plan's base plan; a google_play status without one is monthly, since
+    every purchase before the server change was monthly.
   - Plan card (Status > Remote, signed in, right under the account card, which keeps its
     "Plan:" line): `planCardUi` derives a plain `PlanCardUi` from the coordinator state and is
     JVM-tested. provider none: "Current plan: Free" and both products with Subscribe.
@@ -1917,7 +1996,18 @@ computer on the same Wi-Fi; claude.ai cannot reach a LAN address. Code in `local
     (`ACTION_VIEW`, so the Play Store app handles it). google_play without a `productId`
     (Play billing off on that server) shows the tier and dates only. admin: "Granted to your
     account", no buttons. polar, paddle or an unknown provider: "managed on the web", no
-    buttons, no Play link. While preparing, launching, registering or pending every button is
+    buttons, no Play link. With at least one yearly offer, or a yearly current Play plan, a
+    Material3 Monthly / Yearly
+    segmented switch sits above the rows; it starts on the current Play plan's interval, else
+    Monthly, and the pick is kept with `rememberSaveable`. Rows compare (product, base plan)
+    with the current plan: the same is "Current plan", the current product on the other base
+    plan is "Switch to yearly" / "Switch to monthly", another product "Switch to <tier>". The
+    base plans shown are those of the loaded offers plus the current plan's: a yearly
+    subscriber with no yearly offer loaded still gets the switch (Yearly selected) and their
+    product's row. The Current row never says "Not available in Google Play": it shows the
+    plan name, the price when Play has it (else no price line) and the disabled "Current plan"
+    button; the other yearly rows are "Not available in Google Play".
+    While preparing, launching, registering or pending every button is
     disabled; Pending (with Try again), Done (Dismiss) and Failed (Try again and Dismiss) show
     a line. Strings are in
     `strings.xml` (`plan_*`). Dates use the locale's medium date format.
@@ -1925,7 +2015,7 @@ computer on the same Wi-Fi; claude.ai cannot reach a LAN address. Code in `local
     redact tokens in `toString`; tests check that neither the purchase token nor the access
     token reaches `TunnelLog`.
   - Waits on Play Console (not doable from this repo): creating `ankimcp_plus` and
-    `ankimcp_pro` with the `monthly` base plan and prices, activating them, license testers,
+    `ankimcp_pro` with the `monthly` and `yearly` base plans and prices, activating them, license testers,
     and an internal-testing upload signed with the upload key (Play only serves products to a
     Play-signed install of this package). Until then `queryProductDetails` returns nothing
     and the card says "Plans are not available yet". Real-time developer
@@ -1958,7 +2048,22 @@ computer on the same Wi-Fi; claude.ai cannot reach a LAN address. Code in `local
     line per call, and keeps a google-play 404 an error, `PlanCardTest`
     (each provider and status, renewal lines, buttons, catalog notes, busy, registering and
     pending disabling the buttons, a product without the base plan shown unavailable, none
-    available as the empty note).
+    available as the empty note). Yearly plans and promo offers added: `BillingProductsTest`
+    (the replacement-mode matrix, an upgrade with a promo as full price, same plan as no
+    change, interval to base plan),
+    `PlayOffersTest` (base offer only, valid finite and single-payment discounts, finite with
+    one cycle ignored, free trial, two discount phases, a different recurring price or period,
+    a discount not below the regular price, validity and cheapest by price per day, an
+    unparseable period, another currency, untagged offers, Play order on a tie, the promo token
+    launched, period parsing), `BillingApiTest` (`interval` month, year, null, unknown, absent),
+    `BillingCoordinatorTest` (catalog with and without yearly, yearly purchase, a missing base
+    plan, same product monthly to yearly and back not short-circuited, null interval as
+    monthly, a status about another product as monthly, cross-product modes, the same-product
+    switch's token registered, the promo launch log line, an upgrade with a promo launched
+    with its token and full price), `PlanCardTest` (switch visibility and default, actions per
+    base plan, yearly missing on one product, a yearly subscriber without yearly offers, price
+    labels, promo rows, no promo on the Current row, and the promo length wording including
+    cycles and parsed periods).
 
 ## Remote access
 
@@ -2043,6 +2148,89 @@ computer on the same Wi-Fi; claude.ai cannot reach a LAN address. Code in `local
     `WakeHandlerTest` (the switch flipped after the entry check stops the run),
     `StatusTabsTest` (grey Remote dot when off).
 
+## Sign-out
+
+- **D64. Sign-out also ends the browser's Keycloak session (RP-initiated logout in a Custom
+  Tab).** Sign-out used to clear only the local credentials. The device flow signs in through
+  the phone's browser, so Keycloak's SSO cookie stayed there, and the next sign-in with another
+  account failed with "You are already authenticated as different user". The SaaS web app
+  solves the same problem with OIDC RP-initiated logout; the app does the same.
+  - Flow: `MainViewModel.logout()` reads the stored `id_token` before anything is cleared,
+    runs the existing logout unchanged (`PushCoordinator.logout` clears the credentials on
+    success and on timeout), then puts
+    `{AUTH_URL}/protocol/openid-connect/logout?id_token_hint=<id_token>&post_logout_redirect_uri=ai.ankimcp.ankidroid://signed-out`
+    (`auth/EndSession.kt`) into `AppGraph.pendingEndSession` (`auth/PendingEndSession`). The
+    holder is process-wide and in memory only (the URL carries the id_token, so it is never
+    written to disk); `take()` returns the URL and clears it, so it opens once. MainActivity
+    observes it while started and opens it in a Custom Tab (ACTION_VIEW fallback; if neither
+    opens, including any RuntimeException from the launch, one fixed TunnelLog line "Could not
+    open the browser to finish sign-out", never the URL or the exception message). Sign-out can
+    take up to ~15 s (push unregistration); if the user leaves the app meanwhile, or
+    MainActivity is finished, the tab opens when they next return to the app, as long as the
+    process is still alive; if the process dies first, the URL is gone and only the browser
+    session survives. Local sign-out is already complete by then and nothing in this step can
+    block or undo it; if the user closes the tab instead, only the browser session survives,
+    as before.
+  - Why a Custom Tab: the cookie to remove lives in the browser the device flow used, and a
+    Custom Tab shares that browser's cookie jar; our own HTTP client has no access to it.
+    Calling the end-session endpoint or revoking the refresh token from OkHttp instead would
+    rely on Keycloak tying the browser's SSO session to our offline session, which was not
+    verified, and the cookie itself would stay. The front-channel round trip is what the SaaS
+    web app does and what OIDC RP-initiated logout specifies, so it is the one path known to
+    clear the browser.
+  - `id_token`: `/auth/token` forwards Keycloak's full response, and with `scope=openid` it
+    contains an `id_token`. `Credentials` now stores it (`id_token`, optional, so older stored
+    JSON still parses; `toString()` stays redacted). The refresh grant replaces it when the
+    response has one and keeps the previous one otherwise. It is used only as
+    `id_token_hint`. Trade-off: it travels in a URL, so it can end up in the browser's history;
+    it carries identity claims (user id, email), not API scopes. The URL is never logged;
+    `LogReport.redact` matches `id_token_hint=` besides the JWT pattern, as a backstop.
+  - Expired hint: the stored id_token is almost always expired at sign-out (same lifespan as
+    the access token, and the refresh grant only runs near expiry). The Keycloak docs do not
+    say whether an expired hint is accepted: the server admin guide (RP-Initiated Logout) and
+    the 18.0.0 upgrade notes only say the hint must be "a valid ID Token that was obtained
+    during the login". The source (keycloak/keycloak `main`, read 2026-11-04) answers it:
+    `LogoutEndpoint` checks the hint with `TokenManager.verifyIDTokenSignature` (decode +
+    signature) and `TokenVerifier.createWithoutSignature(..).tokenType(ID).verify()`; neither
+    adds `IS_ACTIVE` (the `exp` check, only added by `withDefaultChecks()`/`checkActive`), so
+    `exp` is not checked. It compares `azp` with `client_id` only when `client_id` is sent;
+    without it (our `id_token_hint` path) the client is taken from `azp` (`ankimcp-cli`) and
+    `post_logout_redirect_uri` is validated against that client's registered URIs. It fails
+    with an error page on a bad signature or wrong type, asks for confirmation when the hint's
+    `sid` differs from the browser's SSO session, and rejects a hint issued before the session
+    started. This is read from code, not documented behaviour, so it can change between
+    Keycloak versions and stays first on the device checklist below.
+  - Without an `id_token` (credentials stored before this change), the URL sends
+    `client_id=ankimcp-cli` instead; Keycloak then shows its own "Do you want to log out?"
+    page before redirecting. Credentials refreshed once after the update carry an id_token.
+  - Redirect: `ai.ankimcp.ankidroid://signed-out` is registered on the Keycloak client
+    (infra). It is caught by `ui/SignedOutRedirectActivity`, a no-UI trampoline that starts
+    MainActivity with `CLEAR_TOP | SINGLE_TOP` (closing the tab above it) and finishes, the
+    pattern AppAuth uses for its redirect activity. Not an intent filter on MainActivity: it is
+    `singleTop`, and the browser starts the redirect with the tab on top, so a second
+    MainActivity would be stacked over the tab; `singleTask` would fix that but also clear the
+    sign-in Custom Tab or the Play purchase sheet whenever the user comes back through the
+    launcher icon or a notification. MainActivity's launch mode is unchanged.
+  - The redirect activity is exported with a `BROWSABLE` filter, so any app or web page can
+    open `ai.ankimcp.ankidroid://signed-out`. All it does is bring our task forward with
+    `CLEAR_TOP`, which at worst closes a sign-in tab or the Play sheet sitting above
+    MainActivity; the intent's data and extras are ignored. AppAuth's redirect activity has the
+    same exposure.
+  - Auth base: `-Pankimcp.authUrl` (debug builds, like `-Pankimcp.tunnelUrl`), default
+    `https://auth.ankimcp.ai/realms/ankimcp`, exposed as `AppConfig.authUrl` from
+    `BuildConfig.AUTH_URL`; release builds always use the default. Dev:
+    `https://auth.ankimcp.uk/realms/ankimcp` (the realm is `ankimcp` on every environment). Set
+    separately rather than derived from the tunnel host, which does not map onto the auth host.
+    Setting `-Pankimcp.tunnelUrl` without `-Pankimcp.authUrl` fails the Gradle configuration,
+    so a dev-relay build cannot send sign-out to the prod Keycloak.
+  - Tests (JVM): `EndSessionTest` (id_token_hint, client_id fallback for null or blank,
+    encoding, trailing slash), `PendingEndSessionTest` (set/take once, take on empty,
+    replace), `CredentialsTest` (round trip with and without id_token, old
+    JSON, redacted `toString`), `DeviceFlowClientTest` (id_token from the device-code grant,
+    from the refresh grant, kept when the refresh has none), `TokenRefresherTest` (the stored
+    id_token survives a refresh without one), `LogReportTest` (`id_token_hint=` redacted).
+    `MainViewModel` has no JVM harness, so setting the URL and the Custom Tab are untested.
+
 ## Not done
 
 - D62 (Google Play Billing): JVM-tested only, with fake Play and MockWebServer. Not yet run
@@ -2094,3 +2282,11 @@ computer on the same Wi-Fi; claude.ai cannot reach a LAN address. Code in `local
   how long a killed process's lines survive in logd, whether ColorOS drops our debug lines
   from logcat, the share sheet with the `content://` URI in mail, Telegram and Drive, and
   the file log's behaviour across a Hans freeze and a process kill.
+- D64 (browser sign-out): JVM-tested only. Not yet run on a device:
+  1. Expired hint accepted? Sign out with an id_token past its `exp`: Keycloak should redirect
+     without a confirm or error page (the source says `exp` is not checked; not documented).
+  2. The hint's `sid` matching the browser's SSO session after a device-flow sign-in (a
+     mismatch gives a confirm page).
+  3. The redirect closing the tab and returning to the existing MainActivity.
+  4. Leaving the app during sign-out: the tab opens on return.
+  5. A second-account sign-in afterwards.

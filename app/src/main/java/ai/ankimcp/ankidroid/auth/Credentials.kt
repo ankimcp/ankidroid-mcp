@@ -33,6 +33,8 @@ data class Credentials(
     /** ISO-8601 instant; computed client-side from `expires_in`. */
     @SerialName("expires_at") val expiresAt: String,
     val user: UserInfo,
+    /** OIDC id_token, only sent back as the sign-out page's `id_token_hint` (D64); absent in older stored JSON. */
+    @SerialName("id_token") val idToken: String? = null,
 ) {
     /**
      * True if the access token expires within [bufferSeconds] or [expiresAt] cannot be

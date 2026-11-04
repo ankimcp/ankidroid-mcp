@@ -22,8 +22,10 @@ import org.junit.Test
 @OptIn(ExperimentalCoroutinesApi::class)
 class BillingCoordinatorTest {
     private val accountId = "cd".repeat(32)
-    private val plus = SubscriptionProduct(BillingProducts.PLUS, "€4.99", "P1M", "offer-plus")
-    private val pro = SubscriptionProduct(BillingProducts.PRO, "€9.99", "P1M", "offer-pro")
+    private val plus = SubscriptionProduct(BillingProducts.PLUS, BillingProducts.MONTHLY, "€4.99", "P1M", "offer-plus")
+    private val pro = SubscriptionProduct(BillingProducts.PRO, BillingProducts.MONTHLY, "€9.99", "P1M", "offer-pro")
+    private val plusYearly = SubscriptionProduct(BillingProducts.PLUS, BillingProducts.YEARLY, "€49.99", "P1Y", "offer-plus-y")
+    private val proYearly = SubscriptionProduct(BillingProducts.PRO, BillingProducts.YEARLY, "€99.99", "P1Y", "offer-pro-y")
     private val host = object : PurchaseHost {}
 
     private class FakeGateway : BillingGateway {
@@ -158,7 +160,7 @@ class BillingCoordinatorTest {
         val h = harness()
         h.loaded()
         advanceUntilIdle()
-        h.coordinator.subscribe(BillingProducts.PLUS) { host }
+        h.coordinator.subscribe(BillingProducts.PLUS, BillingProducts.MONTHLY) { host }
         advanceUntilIdle()
         assertEquals(PurchaseFlow.Launching(BillingProducts.PLUS), h.coordinator.state.value.flow)
         val launch = h.gateway.launches.single()
@@ -188,10 +190,10 @@ class BillingCoordinatorTest {
         h.backend.prepareResult = BillingApiResult.Ok(PrepareResponse(accountId, PrepareMode.Replace, BillingProducts.PLUS))
         h.gateway.purchasesResult = GatewayResult.Ok(listOf(purchase("old", acknowledged = true)))
         RegisteredPurchases(h.store).add("old")
-        h.coordinator.subscribe(BillingProducts.PRO) { host }
+        h.coordinator.subscribe(BillingProducts.PRO, BillingProducts.MONTHLY) { host }
         advanceUntilIdle()
         assertEquals(
-            ReplaceRequest("old", BillingProducts.PLUS, ReplacementMode.ChargeProratedPrice),
+            ReplaceRequest("old", BillingProducts.PLUS, BillingProducts.MONTHLY, ReplacementMode.ChargeProratedPrice),
             h.gateway.launches.single().replace,
         )
         assertEquals(accountId, h.gateway.launches.single().obfuscatedAccountId)
@@ -205,7 +207,7 @@ class BillingCoordinatorTest {
         h.backend.prepareResult = BillingApiResult.Ok(PrepareResponse(accountId, PrepareMode.Replace, BillingProducts.PRO))
         h.gateway.purchasesResult = GatewayResult.Ok(listOf(purchase("old", product = BillingProducts.PRO, acknowledged = true)))
         RegisteredPurchases(h.store).add("old")
-        h.coordinator.subscribe(BillingProducts.PLUS) { host }
+        h.coordinator.subscribe(BillingProducts.PLUS, BillingProducts.MONTHLY) { host }
         advanceUntilIdle()
         assertEquals(ReplacementMode.Deferred, h.gateway.launches.single().replace?.mode)
     }
@@ -216,7 +218,7 @@ class BillingCoordinatorTest {
         h.loaded()
         advanceUntilIdle()
         h.backend.prepareResult = BillingApiResult.Ok(PrepareResponse(accountId, PrepareMode.Replace, BillingProducts.PLUS))
-        h.coordinator.subscribe(BillingProducts.PLUS) { host }
+        h.coordinator.subscribe(BillingProducts.PLUS, BillingProducts.MONTHLY) { host }
         advanceUntilIdle()
         assertTrue(h.gateway.launches.isEmpty())
         assertEquals(PurchaseFlow.Idle, h.coordinator.state.value.flow)
@@ -228,7 +230,7 @@ class BillingCoordinatorTest {
         h.loaded()
         advanceUntilIdle()
         h.backend.prepareResult = BillingApiResult.Ok(PrepareResponse(accountId, PrepareMode.Replace, BillingProducts.PLUS))
-        h.coordinator.subscribe(BillingProducts.PRO) { host }
+        h.coordinator.subscribe(BillingProducts.PRO, BillingProducts.MONTHLY) { host }
         advanceUntilIdle()
         assertTrue(h.gateway.launches.isEmpty())
         assertEquals(PurchaseFlow.Failed(BillingError.ReplaceOtherAccount), h.coordinator.state.value.flow)
@@ -240,7 +242,7 @@ class BillingCoordinatorTest {
         h.loaded()
         advanceUntilIdle()
         h.backend.prepareResult = BillingApiResult.Ok(PrepareResponse(accountId, PrepareMode.Blocked, null))
-        h.coordinator.subscribe(BillingProducts.PRO) { host }
+        h.coordinator.subscribe(BillingProducts.PRO, BillingProducts.MONTHLY) { host }
         advanceUntilIdle()
         assertTrue(h.gateway.launches.isEmpty())
         assertEquals(PurchaseFlow.Failed(BillingError.ManagedElsewhere), h.coordinator.state.value.flow)
@@ -251,7 +253,7 @@ class BillingCoordinatorTest {
         val h = harness()
         h.loaded()
         advanceUntilIdle()
-        h.coordinator.subscribe(BillingProducts.PRO) { host }
+        h.coordinator.subscribe(BillingProducts.PRO, BillingProducts.MONTHLY) { host }
         advanceUntilIdle()
         h.gateway.updatesFlow.emit(
             PurchaseUpdate.Purchases(listOf(purchase("tok-p", BillingProducts.PRO, PlayPurchase.State.Pending))),
@@ -408,7 +410,7 @@ class BillingCoordinatorTest {
         val h = harness()
         h.loaded()
         advanceUntilIdle()
-        h.coordinator.subscribe(BillingProducts.PLUS) { host }
+        h.coordinator.subscribe(BillingProducts.PLUS, BillingProducts.MONTHLY) { host }
         advanceUntilIdle()
         h.gateway.updatesFlow.emit(PurchaseUpdate.Canceled)
         advanceUntilIdle()
@@ -422,7 +424,7 @@ class BillingCoordinatorTest {
         advanceUntilIdle()
         h.gateway.launchResult = GatewayResult.Error(GatewayError.AlreadyOwned, "owned")
         h.gateway.purchasesResult = GatewayResult.Ok(listOf(purchase("tok-o")))
-        h.coordinator.subscribe(BillingProducts.PLUS) { host }
+        h.coordinator.subscribe(BillingProducts.PLUS, BillingProducts.MONTHLY) { host }
         advanceUntilIdle()
         assertEquals(listOf("tok-o"), h.backend.sentTokens)
         assertEquals(PurchaseFlow.Done("plus"), h.coordinator.state.value.flow)
@@ -435,7 +437,7 @@ class BillingCoordinatorTest {
         h.loaded()
         advanceUntilIdle()
         assertEquals(Catalog.Unavailable(GatewayError.Unavailable), h.coordinator.state.value.catalog)
-        h.coordinator.subscribe(BillingProducts.PLUS) { host }
+        h.coordinator.subscribe(BillingProducts.PLUS, BillingProducts.MONTHLY) { host }
         advanceUntilIdle()
         assertEquals(PurchaseFlow.Failed(BillingError.ProductUnavailable), h.coordinator.state.value.flow)
     }
@@ -526,7 +528,7 @@ class BillingCoordinatorTest {
         h.gateway.purchasesResult = GatewayResult.Ok(listOf(purchase("tok-a")))
         h.loaded()
         advanceUntilIdle()
-        h.coordinator.subscribe(BillingProducts.PRO) { host }
+        h.coordinator.subscribe(BillingProducts.PRO, BillingProducts.MONTHLY) { host }
         advanceUntilIdle()
         h.gateway.updatesFlow.emit(PurchaseUpdate.Purchases(listOf(purchase("tok-b", BillingProducts.PRO))))
         advanceUntilIdle()
@@ -552,7 +554,7 @@ class BillingCoordinatorTest {
         val h = harness()
         h.loaded()
         advanceUntilIdle()
-        h.coordinator.subscribe(BillingProducts.PLUS) { host }
+        h.coordinator.subscribe(BillingProducts.PLUS, BillingProducts.MONTHLY) { host }
         advanceUntilIdle()
         assertEquals(PurchaseFlow.Launching(BillingProducts.PLUS), h.coordinator.state.value.flow)
 
@@ -573,7 +575,7 @@ class BillingCoordinatorTest {
         h.gateway.purchasesResult = GatewayResult.Ok(listOf(purchase("old", product = BillingProducts.PRO, acknowledged = true)))
         RegisteredPurchases(h.store).add("old")
         h.backend.defaultRegister = BillingApiResult.Ok("pro")
-        h.coordinator.subscribe(BillingProducts.PLUS) { host }
+        h.coordinator.subscribe(BillingProducts.PLUS, BillingProducts.MONTHLY) { host }
         advanceUntilIdle()
         assertEquals(ReplacementMode.Deferred, h.gateway.launches.single().replace?.mode)
         assertEquals(PurchaseFlow.Launching(BillingProducts.PLUS), h.coordinator.state.value.flow)
@@ -596,7 +598,7 @@ class BillingCoordinatorTest {
         h.backend.prepareResult = BillingApiResult.Ok(PrepareResponse(accountId, PrepareMode.Replace, BillingProducts.PRO))
         h.gateway.purchasesResult = GatewayResult.Ok(listOf(purchase("old", product = BillingProducts.PRO, acknowledged = true)))
         RegisteredPurchases(h.store).add("old")
-        h.coordinator.subscribe(BillingProducts.PLUS) { host }
+        h.coordinator.subscribe(BillingProducts.PLUS, BillingProducts.MONTHLY) { host }
         advanceUntilIdle()
         assertEquals(PurchaseFlow.Launching(BillingProducts.PLUS), h.coordinator.state.value.flow)
         return h
@@ -629,7 +631,7 @@ class BillingCoordinatorTest {
         val h = harness()
         h.loaded()
         advanceUntilIdle()
-        h.coordinator.subscribe(BillingProducts.PLUS) { host }
+        h.coordinator.subscribe(BillingProducts.PLUS, BillingProducts.MONTHLY) { host }
         advanceUntilIdle()
         assertNull(h.gateway.launches.single().replace)
         h.backend.defaultRegister = BillingApiResult.Ok("pro")
@@ -654,7 +656,7 @@ class BillingCoordinatorTest {
         h.gateway.purchasesResult = GatewayResult.Ok(listOf(purchase("old", acknowledged = true)))
         RegisteredPurchases(h.store).add("old")
         h.backend.defaultRegister = BillingApiResult.Ok("pro")
-        h.coordinator.subscribe(BillingProducts.PRO) { host }
+        h.coordinator.subscribe(BillingProducts.PRO, BillingProducts.MONTHLY) { host }
         advanceUntilIdle()
         assertEquals(PurchaseFlow.Launching(BillingProducts.PRO), h.coordinator.state.value.flow)
 
@@ -669,7 +671,7 @@ class BillingCoordinatorTest {
         val h = harness()
         h.loaded()
         advanceUntilIdle()
-        h.coordinator.subscribe(BillingProducts.PLUS) { host }
+        h.coordinator.subscribe(BillingProducts.PLUS, BillingProducts.MONTHLY) { host }
         advanceUntilIdle()
         h.gateway.updatesFlow.emit(PurchaseUpdate.Purchases(emptyList()))
         advanceUntilIdle()
@@ -731,7 +733,7 @@ class BillingCoordinatorTest {
         h.coordinator.refresh(force = true)
         advanceTimeBy(100)
         assertEquals(PurchaseFlow.Registering(BillingProducts.PLUS), h.coordinator.state.value.flow)
-        h.coordinator.subscribe(BillingProducts.PRO) { host }
+        h.coordinator.subscribe(BillingProducts.PRO, BillingProducts.MONTHLY) { host }
         advanceUntilIdle()
         assertTrue(h.gateway.launches.isEmpty())
         assertEquals("only the restore's prepare", 1, h.backend.prepareCalls)
@@ -745,7 +747,7 @@ class BillingCoordinatorTest {
         h.gateway.purchasesResult = GatewayResult.Ok(listOf(purchase("tok-p", state = PlayPurchase.State.Pending)))
         h.loaded()
         advanceUntilIdle()
-        h.coordinator.subscribe(BillingProducts.PRO) { host }
+        h.coordinator.subscribe(BillingProducts.PRO, BillingProducts.MONTHLY) { host }
         advanceUntilIdle()
         assertEquals(0, h.backend.prepareCalls)
         assertEquals(PurchaseFlow.Pending(BillingProducts.PLUS), h.coordinator.state.value.flow)
@@ -783,7 +785,7 @@ class BillingCoordinatorTest {
         advanceUntilIdle()
         h.gateway.launchResult = GatewayResult.Error(GatewayError.AlreadyOwned, "owned")
         h.gateway.purchasesResult = GatewayResult.Ok(listOf(purchase("tok-other", account = "ef".repeat(32))))
-        h.coordinator.subscribe(BillingProducts.PLUS) { host }
+        h.coordinator.subscribe(BillingProducts.PLUS, BillingProducts.MONTHLY) { host }
         advanceUntilIdle()
         assertEquals(PurchaseFlow.Failed(BillingError.NotOwned), h.coordinator.state.value.flow)
         assertTrue(h.backend.sentTokens.isEmpty())
@@ -829,7 +831,7 @@ class BillingCoordinatorTest {
         h.loaded()
         advanceUntilIdle()
         var preparesWhenAsked = -1
-        h.coordinator.subscribe(BillingProducts.PLUS) {
+        h.coordinator.subscribe(BillingProducts.PLUS, BillingProducts.MONTHLY) {
             preparesWhenAsked = h.backend.prepareCalls
             null
         }
@@ -860,7 +862,7 @@ class BillingCoordinatorTest {
         h.coordinator.refresh(force = true)
         advanceTimeBy(100)
         assertEquals(PurchaseFlow.Checking, h.coordinator.state.value.flow)
-        h.coordinator.subscribe(BillingProducts.PRO) { host }
+        h.coordinator.subscribe(BillingProducts.PRO, BillingProducts.MONTHLY) { host }
         advanceUntilIdle()
         assertEquals(0, h.backend.prepareCalls)
         assertTrue(h.gateway.launches.isEmpty())
@@ -887,7 +889,7 @@ class BillingCoordinatorTest {
         h.loaded()
         advanceUntilIdle()
         h.backend.prepareDelayMs = 1_000
-        h.coordinator.subscribe(BillingProducts.PRO) { host }
+        h.coordinator.subscribe(BillingProducts.PRO, BillingProducts.MONTHLY) { host }
         runCurrent()
         assertEquals(PurchaseFlow.Preparing(BillingProducts.PRO), h.coordinator.state.value.flow)
         // An earlier pending Plus payment goes through while Pro is being prepared.
@@ -929,6 +931,180 @@ class BillingCoordinatorTest {
         h.gateway.productsResult = GatewayResult.Ok(listOf(pro))
         h.loaded()
         advanceUntilIdle()
-        assertEquals(Catalog.Loaded(listOf(pro), missing = listOf(BillingProducts.PLUS)), h.coordinator.state.value.catalog)
+        val catalog = h.coordinator.state.value.catalog as Catalog.Loaded
+        assertEquals(Catalog.Loaded(listOf(pro)), catalog)
+        assertEquals(listOf(BillingProducts.PLUS), catalog.missing())
+        assertEquals(BillingProducts.ALL, catalog.missing(BillingProducts.YEARLY))
+        assertFalse(catalog.offers(BillingProducts.YEARLY))
+    }
+
+    @Test
+    fun `catalog with yearly offers is sorted by tier, monthly first`() = runTest {
+        val h = harness()
+        h.gateway.productsResult = GatewayResult.Ok(listOf(proYearly, pro, plusYearly, plus))
+        h.loaded()
+        advanceUntilIdle()
+        val catalog = h.coordinator.state.value.catalog as Catalog.Loaded
+        assertEquals(listOf(plus, plusYearly, pro, proYearly), catalog.products)
+        assertTrue(catalog.offers(BillingProducts.YEARLY))
+        assertEquals(emptyList<String>(), catalog.missing(BillingProducts.YEARLY))
+    }
+
+    @Test
+    fun `a new yearly purchase launches the yearly item`() = runTest {
+        val h = harness()
+        h.gateway.productsResult = GatewayResult.Ok(listOf(plus, plusYearly, pro, proYearly))
+        h.loaded()
+        advanceUntilIdle()
+        h.coordinator.subscribe(BillingProducts.PLUS, BillingProducts.YEARLY) { host }
+        advanceUntilIdle()
+        assertEquals(plusYearly, h.gateway.launches.single().product)
+        assertTrue(h.log.entries.value.any { it.message == "Billing: opening Google Play for ankimcp_plus/yearly" })
+    }
+
+    @Test
+    fun `a base plan Play does not offer is product unavailable`() = runTest {
+        val h = harness()
+        h.loaded()
+        advanceUntilIdle()
+        h.coordinator.subscribe(BillingProducts.PLUS, BillingProducts.YEARLY) { host }
+        advanceUntilIdle()
+        assertTrue(h.gateway.launches.isEmpty())
+        assertEquals(PurchaseFlow.Failed(BillingError.ProductUnavailable), h.coordinator.state.value.flow)
+    }
+
+    @Test
+    fun `a promo item launches as is, the gateway uses its offer token`() = runTest {
+        val h = harness()
+        val promo = PromoOffer("cyber", "promo-token", "€34.99", "P1Y", 1)
+        h.gateway.productsResult = GatewayResult.Ok(listOf(plus, plusYearly.copy(promo = promo), pro))
+        h.loaded()
+        advanceUntilIdle()
+        h.coordinator.subscribe(BillingProducts.PLUS, BillingProducts.YEARLY) { host }
+        advanceUntilIdle()
+        assertEquals("promo-token", h.gateway.launches.single().product.launchOfferToken)
+        assertTrue(h.log.entries.value.any { it.message == "Billing: opening Google Play for ankimcp_plus/yearly with offer cyber" })
+    }
+
+    /** [statusProductId]: the product the loaded status names; /prepare always says [productId]. */
+    private fun TestScope.onPlayPlan(
+        productId: String,
+        interval: BillingInterval?,
+        products: List<SubscriptionProduct> = listOf(plus, plusYearly, pro, proYearly),
+        statusProductId: String = productId,
+    ): Harness {
+        val h = harness()
+        h.gateway.productsResult = GatewayResult.Ok(products)
+        h.status.result = BillingApiResult.Ok(
+            PlanStatus("plus", PlanStatusKind.Active, PlanProvider.GooglePlay, null, false, statusProductId, interval),
+        )
+        h.loaded()
+        advanceUntilIdle()
+        h.backend.prepareResult = BillingApiResult.Ok(PrepareResponse(accountId, PrepareMode.Replace, productId))
+        h.gateway.purchasesResult = GatewayResult.Ok(listOf(purchase("old", product = productId, acknowledged = true)))
+        RegisteredPurchases(h.store).add("old")
+        return h
+    }
+
+    @Test
+    fun `same product monthly to yearly is a full-price replace, not already on this plan`() = runTest {
+        val h = onPlayPlan(BillingProducts.PLUS, BillingInterval.Month)
+        h.coordinator.subscribe(BillingProducts.PLUS, BillingProducts.YEARLY) { host }
+        advanceUntilIdle()
+        val launch = h.gateway.launches.single()
+        assertEquals(plusYearly, launch.product)
+        assertEquals(ReplaceRequest("old", BillingProducts.PLUS, BillingProducts.MONTHLY, ReplacementMode.ChargeFullPrice), launch.replace)
+        assertEquals(PurchaseFlow.Launching(BillingProducts.PLUS), h.coordinator.state.value.flow)
+        assertTrue(
+            h.log.entries.value.any {
+                it.message == "Billing: opening Google Play for ankimcp_plus/yearly (replacing ankimcp_plus/monthly, ChargeFullPrice)"
+            },
+        )
+    }
+
+    @Test
+    fun `same product yearly to monthly keeps the paid year`() = runTest {
+        val h = onPlayPlan(BillingProducts.PRO, BillingInterval.Year)
+        h.coordinator.subscribe(BillingProducts.PRO, BillingProducts.MONTHLY) { host }
+        advanceUntilIdle()
+        assertEquals(
+            ReplaceRequest("old", BillingProducts.PRO, BillingProducts.YEARLY, ReplacementMode.WithoutProration),
+            h.gateway.launches.single().replace,
+        )
+    }
+
+    @Test
+    fun `no interval in the status is monthly - the same monthly plan launches nothing`() = runTest {
+        val h = onPlayPlan(BillingProducts.PLUS, null)
+        h.coordinator.subscribe(BillingProducts.PLUS, BillingProducts.MONTHLY) { host }
+        advanceUntilIdle()
+        assertTrue(h.gateway.launches.isEmpty())
+        assertEquals(PurchaseFlow.Idle, h.coordinator.state.value.flow)
+    }
+
+    @Test
+    fun `the same yearly plan launches nothing`() = runTest {
+        val h = onPlayPlan(BillingProducts.PLUS, BillingInterval.Year)
+        h.coordinator.subscribe(BillingProducts.PLUS, BillingProducts.YEARLY) { host }
+        advanceUntilIdle()
+        assertTrue(h.gateway.launches.isEmpty())
+        assertEquals(PurchaseFlow.Idle, h.coordinator.state.value.flow)
+    }
+
+    @Test
+    fun `plus yearly to pro monthly is prorated, pro yearly to plus yearly deferred`() = runTest {
+        val up = onPlayPlan(BillingProducts.PLUS, BillingInterval.Year)
+        up.coordinator.subscribe(BillingProducts.PRO, BillingProducts.MONTHLY) { host }
+        advanceUntilIdle()
+        assertEquals(
+            ReplaceRequest("old", BillingProducts.PLUS, BillingProducts.YEARLY, ReplacementMode.ChargeProratedPrice),
+            up.gateway.launches.single().replace,
+        )
+        val down = onPlayPlan(BillingProducts.PRO, BillingInterval.Year)
+        down.coordinator.subscribe(BillingProducts.PLUS, BillingProducts.YEARLY) { host }
+        advanceUntilIdle()
+        assertEquals(ReplacementMode.Deferred, down.gateway.launches.single().replace?.mode)
+    }
+
+    @Test
+    fun `a same-product switch's new token from the listener is registered`() = runTest {
+        val h = onPlayPlan(BillingProducts.PLUS, BillingInterval.Month)
+        h.coordinator.subscribe(BillingProducts.PLUS, BillingProducts.YEARLY) { host }
+        advanceUntilIdle()
+        h.gateway.updatesFlow.emit(PurchaseUpdate.Purchases(listOf(purchase("new-yearly"))))
+        advanceUntilIdle()
+        assertEquals(listOf("new-yearly"), h.backend.sentTokens)
+        assertEquals(PurchaseFlow.Done("plus"), h.coordinator.state.value.flow)
+    }
+
+    @Test
+    fun `a status about another product than prepare's is not used - the current plan is monthly`() = runTest {
+        val h = onPlayPlan(BillingProducts.PLUS, BillingInterval.Year, statusProductId = BillingProducts.PRO)
+        h.coordinator.subscribe(BillingProducts.PLUS, BillingProducts.YEARLY) { host }
+        advanceUntilIdle()
+        assertEquals(
+            ReplaceRequest("old", BillingProducts.PLUS, BillingProducts.MONTHLY, ReplacementMode.ChargeFullPrice),
+            h.gateway.launches.single().replace,
+        )
+    }
+
+    @Test
+    fun `an upgrade launched with a promo uses its token and charges the full price`() = runTest {
+        val promo = PromoOffer("cyber", "promo-token", "€69.99", "P1Y", 1)
+        val h = onPlayPlan(BillingProducts.PLUS, BillingInterval.Month, products = listOf(plus, plusYearly, pro, proYearly.copy(promo = promo)))
+        h.coordinator.subscribe(BillingProducts.PRO, BillingProducts.YEARLY) { host }
+        advanceUntilIdle()
+        val launch = h.gateway.launches.single()
+        assertEquals("promo-token", launch.product.launchOfferToken)
+        assertEquals(
+            ReplaceRequest("old", BillingProducts.PLUS, BillingProducts.MONTHLY, ReplacementMode.ChargeFullPrice),
+            launch.replace,
+        )
+        assertTrue(
+            h.log.entries.value.any {
+                it.message ==
+                    "Billing: opening Google Play for ankimcp_pro/yearly with offer cyber (replacing ankimcp_plus/monthly, ChargeFullPrice)"
+            },
+        )
     }
 }

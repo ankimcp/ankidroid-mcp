@@ -65,6 +65,9 @@ class PlayBilling(
     override val updates: Flow<PurchaseUpdate> = _updates.asSharedFlow()
 
     private val details = ConcurrentHashMap<String, ProductDetails>()
+
+    /** "product/basePlan/offerId" of unsupported promo offers already logged in this process. */
+    private val ignoredOffers = ConcurrentHashMap.newKeySet<String>()
     private val connectLock = Mutex()
 
     private val client: BillingClient by lazy {
@@ -99,14 +102,24 @@ class PlayBilling(
         if (result.billingResult.responseCode != BillingResponseCode.OK) {
             return GatewayResult.Error(errorFor(result.billingResult.responseCode), describe(result.billingResult))
         }
-        val products = result.productDetailsList.orEmpty().mapNotNull { productDetails ->
-            val product = toSubscriptionProduct(productDetails)
-            if (product == null) {
-                log.warn("Billing: ${productDetails.productId} has no '${BillingProducts.BASE_PLAN}' base plan offer")
-            } else {
-                details[product.productId] = productDetails
+        val products = result.productDetailsList.orEmpty().flatMap { productDetails ->
+            val productId = productDetails.productId
+            val offers = productDetails.subscriptionOfferDetails.orEmpty().map(::toPlayOffer)
+            val items = BillingProducts.BASE_PLANS.mapNotNull { basePlanId ->
+                val item = OfferSelection.select(productId, basePlanId, offers) { offerId ->
+                    if (ignoredOffers.add("$productId/$basePlanId/$offerId")) {
+                        log.info("Billing: ignoring offer $offerId on $productId/$basePlanId: unsupported shape")
+                    }
+                }
+                if (item == null) {
+                    val line = "Billing: ${productDetails.productId} has no '$basePlanId' base plan offer"
+                    // Yearly may not be set up for a product yet; only monthly missing is a problem.
+                    if (basePlanId == BillingProducts.MONTHLY) log.warn(line) else log.info(line)
+                }
+                item
             }
-            product
+            if (items.isNotEmpty()) details[productDetails.productId] = productDetails
+            items
         }
         return GatewayResult.Ok(products)
     }
@@ -129,7 +142,7 @@ class PlayBilling(
             ?: return GatewayResult.Error(GatewayError.ItemUnavailable, "Product details not loaded")
         val productParams = BillingFlowParams.ProductDetailsParams.newBuilder()
             .setProductDetails(productDetails)
-            .setOfferToken(request.product.offerToken)
+            .setOfferToken(request.product.launchOfferToken)
         request.replace?.let { replace ->
             productParams.setSubscriptionProductReplacementParams(
                 SubscriptionProductReplacementParams.newBuilder()
@@ -138,6 +151,8 @@ class PlayBilling(
                         when (replace.mode) {
                             ReplacementMode.ChargeProratedPrice -> SubscriptionProductReplacementParams.ReplacementMode.CHARGE_PRORATED_PRICE
                             ReplacementMode.Deferred -> SubscriptionProductReplacementParams.ReplacementMode.DEFERRED
+                            ReplacementMode.ChargeFullPrice -> SubscriptionProductReplacementParams.ReplacementMode.CHARGE_FULL_PRICE
+                            ReplacementMode.WithoutProration -> SubscriptionProductReplacementParams.ReplacementMode.WITHOUT_PRORATION
                         },
                     )
                     .build(),
@@ -200,20 +215,27 @@ class PlayBilling(
         return done.await()
     }
 
-    private fun toSubscriptionProduct(productDetails: ProductDetails): SubscriptionProduct? {
-        // Only the `monthly` base plan's own offer (no offerId); no trial or intro offer is ever
-        // picked instead (D62). Without it the product is shown as unavailable.
-        val offer = productDetails.subscriptionOfferDetails.orEmpty()
-            .firstOrNull { it.basePlanId == BillingProducts.BASE_PLAN && it.offerId == null }
-            ?: return null
-        val phase = offer.pricingPhases.pricingPhaseList.lastOrNull() ?: return null
-        return SubscriptionProduct(
-            productId = productDetails.productId,
-            formattedPrice = phase.formattedPrice,
-            billingPeriod = phase.billingPeriod,
-            offerToken = offer.offerToken,
-        )
-    }
+    private fun toPlayOffer(offer: ProductDetails.SubscriptionOfferDetails) = PlayOffer(
+        basePlanId = offer.basePlanId,
+        offerId = offer.offerId,
+        tags = offer.offerTags,
+        offerToken = offer.offerToken,
+        phases = offer.pricingPhases.pricingPhaseList.map { phase ->
+            PlayPhase(
+                priceMicros = phase.priceAmountMicros,
+                priceCurrencyCode = phase.priceCurrencyCode,
+                formattedPrice = phase.formattedPrice,
+                billingPeriod = phase.billingPeriod,
+                billingCycleCount = phase.billingCycleCount,
+                recurrence = when (phase.recurrenceMode) {
+                    ProductDetails.RecurrenceMode.INFINITE_RECURRING -> PlayPhase.Recurrence.Infinite
+                    ProductDetails.RecurrenceMode.FINITE_RECURRING -> PlayPhase.Recurrence.Finite
+                    ProductDetails.RecurrenceMode.NON_RECURRING -> PlayPhase.Recurrence.NonRecurring
+                    else -> PlayPhase.Recurrence.Unknown
+                },
+            )
+        },
+    )
 
     private fun toPlayPurchase(purchase: Purchase) = PlayPurchase(
         productIds = purchase.products,

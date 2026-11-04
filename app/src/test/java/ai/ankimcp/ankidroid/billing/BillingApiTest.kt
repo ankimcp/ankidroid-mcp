@@ -229,6 +229,19 @@ class BillingApiTest {
     }
 
     @Test
+    fun `interval month, year, null, unknown and absent`() {
+        fun intervalOf(field: String) = statusOf(
+            """{"tier":"plus","status":"active","provider":"google_play","currentPeriodEndsAt":"2026-11-18T10:00:00Z","cancelAtPeriodEnd":false,"productId":"ankimcp_plus"$field}""",
+        ).interval
+        assertEquals(BillingInterval.Month, intervalOf(""","interval":"month""""))
+        assertEquals(BillingInterval.Year, intervalOf(""","interval":"year""""))
+        assertNull(intervalOf(""","interval":null"""))
+        assertNull(intervalOf(""","interval":"week""""))
+        assertNull(intervalOf(""","interval":12"""))
+        assertNull(intervalOf(""))
+    }
+
+    @Test
     fun `google play without a product id when billing is off on that environment`() {
         assertNull(
             statusOf(
