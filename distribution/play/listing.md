@@ -63,7 +63,7 @@ Open the Log tab and tap Share log. The shared text includes the app version, An
 Open source
 AnkiMCP is free software under the GNU AGPL-3.0. Source code: https://github.com/ankimcp/ankidroid-mcp
 
-AnkiMCP for AnkiDroid is made by the AnkiMCP project and is not affiliated with or endorsed by AnkiDroid, Anki or Anthropic. Claude is a trademark of Anthropic.
+AnkiMCP is not affiliated with or endorsed by AnkiDroid, Anki or Anthropic. Claude is a trademark of Anthropic.
 ```
 
 ## Store settings
