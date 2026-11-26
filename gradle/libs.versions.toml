@@ -5,8 +5,8 @@
 # and AGP 9.1). See docs/DECISIONS.md.
 agp = "8.13.2"
 kotlin = "2.2.21"
-coroutines = "1.10.2"
-serialization = "1.9.0"
+coroutines = "1.11.0"
+serialization = "1.11.0"
 okhttp = "4.12.0"
 coreKtx = "1.18.0"
 activityCompose = "1.13.0"
